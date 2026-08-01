@@ -1,66 +1,90 @@
-// Port of python's argparse module, version 3.9.0:
-// https://github.com/python/cpython/blob/v3.9.0rc1/Lib/test/test_argparse.py
+// Port of python's argparse module, version 3.14.6:
+// https://github.com/python/cpython/blob/v3.14.6/Lib/test/test_argparse.py
 
 // Copyright (C) 2010-2020 Python Software Foundation.
 // Copyright (C) 2020 argparse.js authors
 
-/* global describe, it, before, after */
-/* eslint-disable quotes, new-cap, new-parens, no-extra-semi, comma-dangle */
+/* eslint-disable new-cap */
 
-// eslint-disable-next-line strict
+
 'use strict'
 
 const assert = require('assert')
+const child_process = require('child_process')
+const { describe, it, beforeEach, afterEach } = require('node:test')
+const { once } = require('events')
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const stream = require('stream')
 const util = require('util')
 const argparse = require('../')
+const _colorize = require('../lib/_colorize')
 const textwrap = require('../lib/textwrap')
 const sub = require('../lib/sub')
 
 
 class JSTestCase {
 
-    run() {
+    run () {
         describe(this.constructor.name, () => {
-            for (let method of this) {
+            let restore_color
+            if (this.force_color !== undefined) {
+                beforeEach(() => {
+                    restore_color = force_color(this.force_color)
+                })
+            }
+            for (const method of this) {
                 if (method === 'setUp') {
-                    before(() => this[method]())
+                    beforeEach(() => this[method]())
                 } else if (method === 'tearDown') {
-                    after(() => this[method]())
+                    afterEach(() => this[method]())
                 } else if (typeof method === 'string' && method.startsWith('skip_test') &&
                     this[method] !== undefined) {
                     it.skip(method, () => this[method]())
                 } else if (typeof method === 'string' && method.startsWith('test') &&
                     this[method] !== undefined) {
-                    it(method, () => this[method]())
+                    const test = () => this[method]()
+                    if (this.force_not_colorized?.has(method)) {
+                        it(method, () => {
+                            const restore = force_color(false)
+                            try {
+                                test()
+                            } finally {
+                                restore()
+                            }
+                        })
+                    } else {
+                        it(method, test)
+                    }
                 }
+            }
+            if (this.force_color !== undefined) {
+                afterEach(() => restore_color())
             }
         })
     }
 
-    * [Symbol.iterator]() {
-        /* eslint-disable consistent-this */
+    * [Symbol.iterator] () {
+
         let self = this
-        let member_names = new Set()
+        const member_names = new Set()
         while (self) {
-            for (let k of Reflect.ownKeys(self)) member_names.add(k)
+            for (const k of Reflect.ownKeys(self)) member_names.add(k)
             self = Object.getPrototypeOf(self)
         }
-        yield* Array.from(member_names)
-        /* eslint-enable consistent-this */
+        yield * Array.from(member_names)
+
     }
 
-    assertEqual(expected, actual)    { assert.deepStrictEqual(actual, expected) }
-    assertNotEqual(expected, actual) { assert.notDeepStrictEqual(actual, expected) }
-    assertIsNone(value)              { assert.strictEqual(value, undefined) }
-    assertRegex(string, regex)       { assert.match(string, regex) }
-    assertNotRegex(string, regex)    { assert.doesNotMatch(string, regex) }
-    assertIn(key, object)            { assert(key in object) }
-    assertNotIn(key, object)         { assert(!(key in object)) }
-    assertRaises(error, fn) {
+    assertEqual (expected, actual)    { assert.deepStrictEqual(actual, expected) }
+    assertNotEqual (expected, actual) { assert.notDeepStrictEqual(actual, expected) }
+    assertIsNone (value)              { assert.strictEqual(value, undefined) }
+    assertRegex (string, regex)       { assert.match(string, regex) }
+    assertNotRegex (string, regex)    { assert.doesNotMatch(string, regex) }
+    assertIn (key, object)            { assert(key in object) }
+    assertNotIn (key, object)         { assert(!(key in object)) }
+    assertRaises (error, fn) {
         let _err
         assert.throws(() => {
             try {
@@ -76,25 +100,60 @@ class JSTestCase {
 
 
 class StdIOBuffer extends stream.Writable {
-    constructor() {
+    constructor () {
         super()
         this.buffer = []
     }
 
-    _write(chunk, enc, callback) {
+    _write (chunk, enc, callback) {
         this.buffer.push(chunk)
         callback()
     }
 
-    getvalue() {
+    getvalue () {
         return Buffer.concat(this.buffer).toString('utf8')
+    }
+}
+
+
+function captured_stderr (fn) {
+    const old_stderr = Object.getOwnPropertyDescriptor(process, 'stderr')
+    Object.defineProperty(process, 'stderr', { value: new StdIOBuffer() })
+    try {
+        fn()
+        return process.stderr.getvalue()
+    } finally {
+        Object.defineProperty(process, 'stderr', old_stderr)
+    }
+}
+
+
+function force_color (color) {
+    const old_can_colorize = _colorize.can_colorize
+    const env_names = ['FORCE_COLOR', 'NO_COLOR', 'PYTHON_COLORS']
+    const old_env = env_names.map(name => ({
+        name,
+        present: Object.prototype.hasOwnProperty.call(process.env, name),
+        value: process.env[name]
+    }))
+
+    _colorize.can_colorize = () => color
+    for (const name of env_names) delete process.env[name]
+    process.env[color ? 'FORCE_COLOR' : 'NO_COLOR'] = '1'
+
+    return () => {
+        _colorize.can_colorize = old_can_colorize
+        for (const name of env_names) delete process.env[name]
+        for (const { name, present, value } of old_env) {
+            if (present) process.env[name] = value
+        }
     }
 }
 
 
 class TestCase extends JSTestCase {
 
-    setUp() {
+    setUp () {
         // The tests assume that line wrapping occurs at 80 columns, but this
         // behaviour can be overridden by setting the COLUMNS environment
         // variable.  To ensure that this width is used, set COLUMNS to 80.
@@ -103,41 +162,84 @@ class TestCase extends JSTestCase {
 }
 
 
-function TempDirMixin(cls) {
+;(new class StdStreamTest extends TestCase {
+
+    test_skip_invalid_stderr () {
+        const parser = new argparse.ArgumentParser()
+        const old_stderr = Object.getOwnPropertyDescriptor(process, 'stderr')
+        const old_exit = Object.getOwnPropertyDescriptor(process, 'exit')
+        Object.defineProperty(process, 'stderr', { value: undefined })
+        Object.defineProperty(process, 'exit', { value: () => {} })
+        try {
+            parser.exit(0, 'foo')
+        } finally {
+            Object.defineProperty(process, 'stderr', old_stderr)
+            Object.defineProperty(process, 'exit', old_exit)
+        }
+    }
+
+    test_skip_invalid_stdout () {
+        const parser = new argparse.ArgumentParser()
+        for (const func of [
+            parser.print_usage.bind(parser),
+            parser.print_help.bind(parser),
+            parser.parse_args.bind(parser, ['-h']),
+        ]) {
+            const mocked_stderr = new StdIOBuffer()
+            const old_stdout = Object.getOwnPropertyDescriptor(process, 'stdout')
+            const old_stderr = Object.getOwnPropertyDescriptor(process, 'stderr')
+            const old_exit = Object.getOwnPropertyDescriptor(process, 'exit')
+            Object.defineProperty(process, 'stdout', { value: undefined })
+            Object.defineProperty(process, 'stderr', { value: mocked_stderr })
+            Object.defineProperty(process, 'exit', { value: () => {} })
+            try {
+                func()
+                this.assertRegex(mocked_stderr.getvalue(), /usage:/)
+            } finally {
+                Object.defineProperty(process, 'stdout', old_stdout)
+                Object.defineProperty(process, 'stderr', old_stderr)
+                Object.defineProperty(process, 'exit', old_exit)
+            }
+        }
+    }
+}).run()
+
+
+function TempDirMixin (cls) {
     return class TempDirMixin extends cls {
 
-        setUp() {
+        setUp () {
             this.temp_dir = path.join(os.tmpdir(), sub('test_argparse_%s', Math.random()))
             this.old_dir = process.cwd()
             fs.mkdirSync(this.temp_dir)
             process.chdir(this.temp_dir)
         }
 
-        tearDown() {
+        tearDown () {
             process.chdir(this.old_dir)
             fs.rmdirSync(this.temp_dir, { recursive: true })
         }
 
-        create_readonly_file(filename) {
-            let file_path = path.join(this.temp_dir, filename)
+        create_readonly_file (filename) {
+            const file_path = path.join(this.temp_dir, filename)
             fs.writeFileSync(file_path, filename)
             fs.chmodSync(file_path, 0o400)
         }
     }
 }
 
-function Sig(...args) {
+function Sig (...args) {
     return args
 }
 
-function NS(dict) {
+function NS (dict) {
     return argparse.Namespace(dict)
 }
 
 
 class ArgumentParserError extends Error {
 
-    constructor(message, stdout, stderr, error_code) {
+    constructor (message, stdout, stderr, error_code) {
         super()
         this.m = message
         this.stdout = stdout
@@ -146,21 +248,21 @@ class ArgumentParserError extends Error {
         this.message = this.toString()
     }
 
-    toString() {
-        return '(' + [ this.m, this.stdout, this.stderr, this.error_code ].join(', ') + ')'
+    toString () {
+        return '(' + [this.m, this.stdout, this.stderr, this.error_code].join(', ') + ')'
     }
 }
 
 
 class SystemExit extends Error {
-    constructor(code) {
+    constructor (code) {
         super()
         this.code = code
     }
 }
 
 
-function stderr_to_parser_error(fn) {
+function stderr_to_parser_error (fn) {
     // if this is being called recursively and stderr or stdout is already being
     // redirected, simply call the function and let the enclosing function
     // catch the exception
@@ -170,23 +272,23 @@ function stderr_to_parser_error(fn) {
 
     // if this is not being called recursively, redirect stderr and
     // use it as the ArgumentParserError message
-    let old_stdout = Object.getOwnPropertyDescriptor(process, 'stdout')
-    let old_stderr = Object.getOwnPropertyDescriptor(process, 'stderr')
+    const old_stdout = Object.getOwnPropertyDescriptor(process, 'stdout')
+    const old_stderr = Object.getOwnPropertyDescriptor(process, 'stderr')
     Object.defineProperty(process, 'stdout', { value: new StdIOBuffer() })
     Object.defineProperty(process, 'stderr', { value: new StdIOBuffer() })
     try {
         try {
-            let result = fn()
-            for (let key of Object.keys(result || {})) {
+            const result = fn()
+            for (const key of Object.keys(result || {})) {
                 if (result[key] === process.stdout) result[key] = old_stdout.get()
                 if (result[key] === process.stderr) result[key] = old_stderr.get()
             }
             return result
         } catch (err) {
             if (!(err instanceof SystemExit)) throw err
-            let code = err.code
-            let stdout = process.stdout.getvalue()
-            let stderr = process.stderr.getvalue()
+            const code = err.code
+            const stdout = process.stdout.getvalue()
+            const stderr = process.stderr.getvalue()
             throw new ArgumentParserError(
                 "SystemExit", stdout, stderr, code)
         }
@@ -199,18 +301,18 @@ function stderr_to_parser_error(fn) {
 
 class ErrorRaisingArgumentParser extends argparse.ArgumentParser {
 
-    parse_args(...args) {
+    parse_args (...args) {
         return stderr_to_parser_error(() => super.parse_args(...args))
     }
 
-    exit(code, message) {
+    exit (code, message) {
         return stderr_to_parser_error(() => {
             this._print_message(message, process.stderr)
             throw new SystemExit(code)
         })
     }
 
-    error(...args) {
+    error (...args) {
         return stderr_to_parser_error(() => super.error(...args))
     }
 }
@@ -233,7 +335,7 @@ class ParserTestCase extends TestCase {
      *      remaining unparsed arguments
      */
 
-    constructor() {
+    constructor () {
         super()
 
         // default parser signature is empty
@@ -247,25 +349,25 @@ class ParserTestCase extends TestCase {
         // ---------------------------------------
         // functions for adding optional arguments
         // ---------------------------------------
-        function no_groups(parser, argument_signatures) {
+        function no_groups (parser, argument_signatures) {
             /* Add all arguments directly to the parser */
-            for (let sig of argument_signatures) {
+            for (const sig of argument_signatures) {
                 parser.add_argument(...sig)
             }
         }
 
-        function one_group(parser, argument_signatures) {
+        function one_group (parser, argument_signatures) {
             /* Add all arguments under a single group in the parser */
-            let group = parser.add_argument_group('foo')
-            for (let sig of argument_signatures) {
+            const group = parser.add_argument_group('foo')
+            for (const sig of argument_signatures) {
                 group.add_argument(...sig)
             }
         }
 
-        function many_groups(parser, argument_signatures) {
+        function many_groups (parser, argument_signatures) {
             /* Add each argument in its own group to the parser */
-            for (let [ i, sig ] of Object.entries(argument_signatures)) {
-                let group = parser.add_argument_group(sub('foo:%i', +i))
+            for (const [i, sig] of Object.entries(argument_signatures)) {
+                const group = parser.add_argument_group(sub('foo:%i', +i))
                 group.add_argument(...sig)
             }
         }
@@ -273,14 +375,14 @@ class ParserTestCase extends TestCase {
         // --------------------------
         // functions for parsing args
         // --------------------------
-        function listargs(parser, args) {
+        function listargs (parser, args) {
             /* Parse the args by passing in a list */
             return parser.parse_args(args)
         }
 
-        function sysargs(parser, args) {
+        function sysargs (parser, args) {
             /* Parse the args by defaulting to sys.argv */
-            let old_sys_argv = process.argv
+            const old_sys_argv = process.argv
             process.argv = [old_sys_argv[0], old_sys_argv[1]].concat(args)
             try {
                 return parser.parse_args()
@@ -293,41 +395,41 @@ class ParserTestCase extends TestCase {
         // addition method and one arg parsing method
         class AddTests {
 
-            constructor(tester_cls, add_arguments, parse_args) {
+            constructor (tester_cls, add_arguments, parse_args) {
                 this._add_arguments = add_arguments
                 this._parse_args = parse_args
 
-                let add_arguments_name = this._add_arguments.name
-                let parse_args_name = this._parse_args.name
-                for (let test_func of [this.test_failures, this.test_successes]) {
-                    let func_name = test_func.name
-                    let names = [ func_name, add_arguments_name, parse_args_name ]
-                    let test_name = names.join('_')
+                const add_arguments_name = this._add_arguments.name
+                const parse_args_name = this._parse_args.name
+                for (const test_func of [this.test_failures, this.test_successes]) {
+                    const func_name = test_func.name
+                    const names = [func_name, add_arguments_name, parse_args_name]
+                    const test_name = names.join('_')
                     tester_cls[test_name] = () => test_func.call(this, tester_cls)
                 }
             }
 
-            _get_parser(tester) {
-                let parser = new tester.parser_class(...tester.parser_signature)
+            _get_parser (tester) {
+                const parser = new tester.parser_class(...tester.parser_signature)
                 this._add_arguments(parser, tester.argument_signatures)
                 return parser
             }
 
-            test_failures(tester) {
-                let parser = this._get_parser(tester)
-                for (let args_str of tester.failures) {
-                    let args = args_str.split(/\s+/).filter(Boolean)
+            test_failures (tester) {
+                const parser = this._get_parser(tester)
+                for (const args_str of tester.failures) {
+                    const args = args_str.split(/\s+/).filter(Boolean)
                     tester.assertRaises(ArgumentParserError, () => parser.parse_args(args))
                 }
             }
 
-            test_successes(tester) {
-                let parser = this._get_parser(tester)
-                for (let [ args, expected_ns ] of tester.successes) {
+            test_successes (tester) {
+                const parser = this._get_parser(tester)
+                for (let [args, expected_ns] of tester.successes) {
                     if (typeof args === 'string') {
                         args = args.split(/\s+/).filter(Boolean)
                     }
-                    let result_ns = tester._normalize_ns(this._parse_args(parser, args))
+                    const result_ns = tester._normalize_ns(this._parse_args(parser, args))
                     tester.assertEqual(expected_ns, result_ns)
                 }
             }
@@ -335,15 +437,15 @@ class ParserTestCase extends TestCase {
 
         // add tests for each combination of an optionals adding method
         // and an arg parsing method
-        for (let add_arguments of [no_groups, one_group, many_groups]) {
-            for (let parse_args of [listargs, sysargs]) {
+        for (const add_arguments of [no_groups, one_group, many_groups]) {
+            for (const parse_args of [listargs, sysargs]) {
                 // eslint-disable-next-line no-new
                 new AddTests(this, add_arguments, parse_args)
             }
         }
     }
 
-    _normalize_ns(ns) {
+    _normalize_ns (ns) {
         return ns
     }
 }
@@ -376,7 +478,7 @@ class ParserTestCase extends TestCase {
         Sig('-z'),
     ]
     failures = ['a', '--foo', '-xa', '-x --foo', '-x -z', '-z -x',
-                '-yx', '-yz a', '-yyyx', '-yyyza', '-xyza']
+                '-yx', '-yz a', '-yyyx', '-yyyza', '-xyza', '-x=']
     successes = [
         ['', NS({ x: false, yyy: undefined, z: undefined })],
         ['-x', NS({ x: true, yyy: undefined, z: undefined })],
@@ -430,15 +532,22 @@ class ParserTestCase extends TestCase {
     /* Test Optionals that partially match but are not subsets */
 
     argument_signatures = [Sig('-foobar'), Sig('-foorab')]
-    failures = ['-f', '-f a', '-fa', '-foa', '-foo', '-fo', '-foo b']
+    failures = ['-f', '-f a', '-fa', '-foa', '-foo', '-fo', '-foo b',
+                '-f=a', '-foo=b']
     successes = [
         ['', NS({ foobar: undefined, foorab: undefined })],
         ['-foob a', NS({ foobar: 'a', foorab: undefined })],
+        ['-foob=a', NS({ foobar: 'a', foorab: undefined })],
         ['-foor a', NS({ foobar: undefined, foorab: 'a' })],
+        ['-foor=a', NS({ foobar: undefined, foorab: 'a' })],
         ['-fooba a', NS({ foobar: 'a', foorab: undefined })],
+        ['-fooba=a', NS({ foobar: 'a', foorab: undefined })],
         ['-foora a', NS({ foobar: undefined, foorab: 'a' })],
+        ['-foora=a', NS({ foobar: undefined, foorab: 'a' })],
         ['-foobar a', NS({ foobar: 'a', foorab: undefined })],
+        ['-foobar=a', NS({ foobar: 'a', foorab: undefined })],
         ['-foorab a', NS({ foobar: undefined, foorab: 'a' })],
+        ['-foorab=a', NS({ foobar: undefined, foorab: 'a' })],
     ]
 }).run()
 
@@ -479,7 +588,7 @@ class ParserTestCase extends TestCase {
         Sig('--badger', { action: 'store_true' }),
         Sig('--bat'),
     ]
-    failures = ['--bar', '--b', '--ba', '--b: 2', '--ba: 4', '--badge 5']
+    failures = ['--bar', '--b', '--ba', '--b=2', '--ba=4', '--badge 5']
     successes = [
         ['', NS({ badger: false, bat: undefined })],
         ['--bat X', NS({ badger: false, bat: 'X' })],
@@ -498,7 +607,7 @@ class ParserTestCase extends TestCase {
         Sig('--badger', { action: 'store_true' }),
         Sig('--ba'),
     ]
-    failures = ['--bar', '--b', '--ba', '--b: 2', '--badge 5']
+    failures = ['--bar', '--b', '--ba', '--b=2', '--badge 5']
     successes = [
         ['', NS({ badger: false, ba: undefined })],
         ['--ba X', NS({ badger: false, ba: 'X' })],
@@ -688,9 +797,9 @@ class ParserTestCase extends TestCase {
         Sig('-w', { nargs: '?' }),
         Sig('-x', { nargs: '?', const: 42 }),
         Sig('-y', { nargs: '?', default: 'spam' }),
-        Sig('-z', { nargs: '?', type: 'int', const: '42', default: '84' }),
+        Sig('-z', { nargs: '?', type: 'int', const: '42', default: '84', choices: [1, 2] }),
     ]
-    failures = ['2']
+    failures = ['2', '-z a', '-z 42', '-z 84']
     successes = [
         ['', NS({ w: undefined, x: undefined, y: 'spam', z: 84 })],
         ['-w', NS({ w: undefined, x: undefined, y: 'spam', z: 84 })],
@@ -749,7 +858,7 @@ class ParserTestCase extends TestCase {
     argument_signatures = [
         Sig('-f', { choices: 'abc' }),
         Sig('-g', { type: 'int', choices: Array(5).fill(0).map((x, i) => i) })]
-    failures = ['a', '-f d', '-fad', '-ga', '-g 6']
+    failures = ['a', '-f d', '-f ab', '-fad', '-ga', '-g 6']
     successes = [
         ['', NS({ f: undefined, g: undefined })],
         ['-f a', NS({ f: 'a', g: undefined })],
@@ -835,14 +944,24 @@ class ParserTestCase extends TestCase {
         ['--no-foo --foo', NS({ foo: true })],
     ]
 
-    test_const() {
+    test_const () {
         // See bpo-40862
-        let parser = argparse.ArgumentParser()
-        let cm = this.assertRaises(TypeError, () =>
+        const parser = argparse.ArgumentParser()
+        const cm = this.assertRaises(TypeError, () =>
             parser.add_argument('--foo', { const: true, action: argparse.BooleanOptionalAction }))
 
         this.assertRegex(String(cm.exception), /got an unexpected keyword argument 'const'/)
     }
+
+    test_invalid_name () {
+        const parser = argparse.ArgumentParser()
+        const cm = this.assertRaises(TypeError, () =>
+            parser.add_argument('--no-foo', { action: argparse.BooleanOptionalAction }))
+        this.assertEqual(
+            "invalid option name '--no-foo' for BooleanOptionalAction",
+            cm.exception.message)
+    }
+
 }).run()
 
 ;(new class TestBooleanOptionalActionRequired extends ParserTestCase {
@@ -880,6 +999,26 @@ class ParserTestCase extends TestCase {
         ['', NS({ baz: ['X'] })],
         ['--baz a', NS({ baz: ['X', 'a'] })],
         ['--baz a --baz b', NS({ baz: ['X', 'a', 'b'] })],
+    ]
+}).run()
+
+
+;(new class TestConstActionsMissingConstKwarg extends ParserTestCase {
+    /* Tests that const gets default value of undefined when not provided */
+
+    argument_signatures = [
+        Sig('-f', { action: 'append_const' }),
+        Sig('--foo', { action: 'append_const' }),
+        Sig('-b', { action: 'store_const' }),
+        Sig('--bar', { action: 'store_const' }),
+    ]
+    failures = ['-f v', '--foo=bar', '--foo bar']
+    successes = [
+        ['', NS({ f: undefined, foo: undefined, b: undefined, bar: undefined })],
+        ['-f', NS({ f: [undefined], foo: undefined, b: undefined, bar: undefined })],
+        ['--foo', NS({ f: undefined, foo: [undefined], b: undefined, bar: undefined })],
+        ['-b', NS({ f: undefined, foo: undefined, b: undefined, bar: undefined })],
+        ['--bar', NS({ f: undefined, foo: undefined, b: undefined, bar: undefined })],
     ]
 }).run()
 
@@ -940,7 +1079,9 @@ class ParserTestCase extends TestCase {
     successes = [
         ['', NS({ foo: undefined, foobaz: undefined, fooble: false })],
         ['--foo 7', NS({ foo: '7', foobaz: undefined, fooble: false })],
+        ['--foo=7', NS({ foo: '7', foobaz: undefined, fooble: false })],
         ['--fooba a', NS({ foo: undefined, foobaz: 'a', fooble: false })],
+        ['--fooba=a', NS({ foo: undefined, foobaz: 'a', fooble: false })],
         ['--foobl --foo g', NS({ foo: 'g', foobaz: undefined, fooble: true })],
     ]
 }).run()
@@ -982,6 +1123,24 @@ class ParserTestCase extends TestCase {
 }).run()
 
 
+;(new class TestOptionalsDisallowSingleDashLongAbbreviation extends ParserTestCase {
+    /* Do not allow abbreviations of long options at all */
+
+    parser_signature = Sig({ allow_abbrev: false })
+    argument_signatures = [
+        Sig('-foo'),
+        Sig('-foodle', { action: 'store_true' }),
+        Sig('-foonly'),
+    ]
+    failures = ['-foon 3', '-food', '-food -foo 2']
+    successes = [
+        ['', NS({ foo: undefined, foodle: false, foonly: undefined })],
+        ['-foo 3', NS({ foo: '3', foodle: false, foonly: undefined })],
+        ['-foonly 7 -foodle -foo 2', NS({ foo: '2', foodle: true, foonly: '7' })],
+    ]
+}).run()
+
+
 ;(new class TestDisallowLongAbbreviationAllowsShortGrouping extends ParserTestCase {
     /* Do not allow abbreviations of long options at all */
 
@@ -1019,6 +1178,45 @@ class ParserTestCase extends TestCase {
         ['+cc +ra', NS({ r: 'a', c: 2 })],
         ['+ccrcc', NS({ r: 'cc', c: 2 })],
     ]
+}).run()
+
+
+class Color extends String {}
+Color.RED = new Color('red')
+Color.GREEN = new Color('green')
+Color.BLUE = new Color('blue')
+
+const colors = [Color.RED, Color.GREEN, Color.BLUE]
+
+;(new class TestStrEnumChoices extends TestCase {
+    force_not_colorized = new Set(['test_help_message_contains_enum_choices'])
+
+    test_parse_enum_value () {
+        const parser = argparse.ArgumentParser()
+        parser.add_argument('--color', {
+            choices: colors,
+            type: value => colors.find(color => String(color) === value) || value
+        })
+        const args = parser.parse_args(['--color', 'red'])
+        this.assertEqual(Color.RED, args.color)
+    }
+
+    test_help_message_contains_enum_choices () {
+        const parser = argparse.ArgumentParser()
+        parser.add_argument('--color', { choices: colors, help: 'Choose a color' })
+        this.assertRegex(parser.format_usage(), /\[--color \{red,green,blue\}\]/)
+        this.assertRegex(parser.format_help(), /  --color \{red,green,blue\}/)
+    }
+
+    test_invalid_enum_value_raises_error () {
+        const parser = argparse.ArgumentParser({ exit_on_error: false })
+        parser.add_argument('--color', { choices: colors })
+        const cm = this.assertRaises(argparse.ArgumentError, () =>
+            parser.parse_args(['--color', 'yellow']))
+        this.assertRegex(
+            String(cm.exception),
+            /invalid choice: 'yellow' \(choose from 'red', 'green', 'blue'\)/)
+    }
 }).run()
 
 
@@ -1075,8 +1273,8 @@ class ParserTestCase extends TestCase {
 ;(new class TestPositionalsNargsZeroOrMoreDefault extends ParserTestCase {
     /* Test a Positional that specifies unlimited nargs and a default */
 
-    argument_signatures = [Sig('foo', { nargs: '*', default: 'bar' })]
-    failures = ['-x']
+    argument_signatures = [Sig('foo', { nargs: '*', default: 'bar', choices: ['a', 'b'] })]
+    failures = ['-x', 'bar', 'a c']
     successes = [
         ['', NS({ foo: 'bar' })],
         ['a', NS({ foo: ['a'] })],
@@ -1112,8 +1310,8 @@ class ParserTestCase extends TestCase {
 ;(new class TestPositionalsNargsOptionalDefault extends ParserTestCase {
     /* Tests an Optional Positional with a default value */
 
-    argument_signatures = [Sig('foo', { nargs: '?', default: 42 })]
-    failures = ['-x', 'a b']
+    argument_signatures = [Sig('foo', { nargs: '?', default: 42, choices: ['a', 'b'] })]
+    failures = ['-x', 'a b', '42']
     successes = [
         ['', NS({ foo: 42 })],
         ['a', NS({ foo: 'a' })],
@@ -1128,9 +1326,9 @@ class ParserTestCase extends TestCase {
      */
 
     argument_signatures = [
-        Sig('foo', { nargs: '?', type: 'int', default: '42' }),
+        Sig('foo', { nargs: '?', type: 'int', default: '42', choices: [1, 2] }),
     ]
-    failures = ['-x', 'a b', '1 2']
+    failures = ['-x', 'a b', '1 2', '42']
     successes = [
         ['', NS({ foo: 42 })],
         ['1', NS({ foo: 1 })],
@@ -1174,12 +1372,20 @@ class ParserTestCase extends TestCase {
 ;(new class TestPositionalsNargsNoneZeroOrMore extends ParserTestCase {
     /* Test a Positional with no nargs followed by one with unlimited */
 
-    argument_signatures = [Sig('foo'), Sig('bar', { nargs: '*' })]
-    failures = ['', '--foo']
+    argument_signatures = [Sig('-x'), Sig('foo'), Sig('bar', { nargs: '*' })]
+    failures = ['', '--foo', 'a b -x X c']
     successes = [
-        ['a', NS({ foo: 'a', bar: [] })],
-        ['a b', NS({ foo: 'a', bar: ['b'] })],
-        ['a b c', NS({ foo: 'a', bar: ['b', 'c'] })],
+        ['a', NS({ x: undefined, foo: 'a', bar: [] })],
+        ['a b', NS({ x: undefined, foo: 'a', bar: ['b'] })],
+        ['a b c', NS({ x: undefined, foo: 'a', bar: ['b', 'c'] })],
+        ['-x X a', NS({ x: 'X', foo: 'a', bar: [] })],
+        ['a -x X', NS({ x: 'X', foo: 'a', bar: [] })],
+        ['-x X a b', NS({ x: 'X', foo: 'a', bar: ['b'] })],
+        ['a -x X b', NS({ x: 'X', foo: 'a', bar: ['b'] })],
+        ['a b -x X', NS({ x: 'X', foo: 'a', bar: ['b'] })],
+        ['-x X a b c', NS({ x: 'X', foo: 'a', bar: ['b', 'c'] })],
+        ['a -x X b c', NS({ x: 'X', foo: 'a', bar: ['b', 'c'] })],
+        ['a b c -x X', NS({ x: 'X', foo: 'a', bar: ['b', 'c'] })],
     ]
 }).run()
 
@@ -1187,11 +1393,17 @@ class ParserTestCase extends TestCase {
 ;(new class TestPositionalsNargsNoneOneOrMore extends ParserTestCase {
     /* Test a Positional with no nargs followed by one with one or more */
 
-    argument_signatures = [Sig('foo'), Sig('bar', { nargs: '+' })]
-    failures = ['', '--foo', 'a']
+    argument_signatures = [Sig('-x'), Sig('foo'), Sig('bar', { nargs: '+' })]
+    failures = ['', '--foo', 'a', 'a b -x X c']
     successes = [
-        ['a b', NS({ foo: 'a', bar: ['b'] })],
-        ['a b c', NS({ foo: 'a', bar: ['b', 'c'] })],
+        ['a b', NS({ x: undefined, foo: 'a', bar: ['b'] })],
+        ['a b c', NS({ x: undefined, foo: 'a', bar: ['b', 'c'] })],
+        ['-x X a b', NS({ x: 'X', foo: 'a', bar: ['b'] })],
+        ['a -x X b', NS({ x: 'X', foo: 'a', bar: ['b'] })],
+        ['a b -x X', NS({ x: 'X', foo: 'a', bar: ['b'] })],
+        ['-x X a b c', NS({ x: 'X', foo: 'a', bar: ['b', 'c'] })],
+        ['a -x X b c', NS({ x: 'X', foo: 'a', bar: ['b', 'c'] })],
+        ['a b c -x X', NS({ x: 'X', foo: 'a', bar: ['b', 'c'] })],
     ]
 }).run()
 
@@ -1199,11 +1411,16 @@ class ParserTestCase extends TestCase {
 ;(new class TestPositionalsNargsNoneOptional extends ParserTestCase {
     /* Test a Positional with no nargs followed by one with an Optional */
 
-    argument_signatures = [Sig('foo'), Sig('bar', { nargs: '?' })]
+    argument_signatures = [Sig('-x'), Sig('foo'), Sig('bar', { nargs: '?' })]
     failures = ['', '--foo', 'a b c']
     successes = [
-        ['a', NS({ foo: 'a', bar: undefined })],
-        ['a b', NS({ foo: 'a', bar: 'b' })],
+        ['a', NS({ x: undefined, foo: 'a', bar: undefined })],
+        ['a b', NS({ x: undefined, foo: 'a', bar: 'b' })],
+        ['-x X a', NS({ x: 'X', foo: 'a', bar: undefined })],
+        ['a -x X', NS({ x: 'X', foo: 'a', bar: undefined })],
+        ['-x X a b', NS({ x: 'X', foo: 'a', bar: 'b' })],
+        ['a -x X b', NS({ x: 'X', foo: 'a', bar: 'b' })],
+        ['a b -x X', NS({ x: 'X', foo: 'a', bar: 'b' })],
     ]
 }).run()
 
@@ -1211,12 +1428,18 @@ class ParserTestCase extends TestCase {
 ;(new class TestPositionalsNargsZeroOrMoreNone extends ParserTestCase {
     /* Test a Positional with unlimited nargs followed by one with none */
 
-    argument_signatures = [Sig('foo', { nargs: '*' }), Sig('bar')]
-    failures = ['', '--foo']
+    argument_signatures = [Sig('-x'), Sig('foo', { nargs: '*' }), Sig('bar')]
+    failures = ['', '--foo', 'a -x X b', 'a -x X b c', 'a b -x X c']
     successes = [
-        ['a', NS({ foo: [], bar: 'a' })],
-        ['a b', NS({ foo: ['a'], bar: 'b' })],
-        ['a b c', NS({ foo: ['a', 'b'], bar: 'c' })],
+        ['a', NS({ x: undefined, foo: [], bar: 'a' })],
+        ['a b', NS({ x: undefined, foo: ['a'], bar: 'b' })],
+        ['a b c', NS({ x: undefined, foo: ['a', 'b'], bar: 'c' })],
+        ['-x X a', NS({ x: 'X', foo: [], bar: 'a' })],
+        ['a -x X', NS({ x: 'X', foo: [], bar: 'a' })],
+        ['-x X a b', NS({ x: 'X', foo: ['a'], bar: 'b' })],
+        ['a b -x X', NS({ x: 'X', foo: ['a'], bar: 'b' })],
+        ['-x X a b c', NS({ x: 'X', foo: ['a', 'b'], bar: 'c' })],
+        ['a b c -x X', NS({ x: 'X', foo: ['a', 'b'], bar: 'c' })],
     ]
 }).run()
 
@@ -1224,11 +1447,16 @@ class ParserTestCase extends TestCase {
 ;(new class TestPositionalsNargsOneOrMoreNone extends ParserTestCase {
     /* Test a Positional with one or more nargs followed by one with none */
 
-    argument_signatures = [Sig('foo', { nargs: '+' }), Sig('bar')]
-    failures = ['', '--foo', 'a']
+    argument_signatures = [Sig('-x'), Sig('foo', { nargs: '+' }), Sig('bar')]
+    failures = ['', '--foo', 'a', 'a -x X b c', 'a b -x X c']
     successes = [
-        ['a b', NS({ foo: ['a'], bar: 'b' })],
-        ['a b c', NS({ foo: ['a', 'b'], bar: 'c' })],
+        ['a b', NS({ x: undefined, foo: ['a'], bar: 'b' })],
+        ['a b c', NS({ x: undefined, foo: ['a', 'b'], bar: 'c' })],
+        ['-x X a b', NS({ x: 'X', foo: ['a'], bar: 'b' })],
+        ['a -x X b', NS({ x: 'X', foo: ['a'], bar: 'b' })],
+        ['a b -x X', NS({ x: 'X', foo: ['a'], bar: 'b' })],
+        ['-x X a b c', NS({ x: 'X', foo: ['a', 'b'], bar: 'c' })],
+        ['a b c -x X', NS({ x: 'X', foo: ['a', 'b'], bar: 'c' })],
     ]
 }).run()
 
@@ -1284,7 +1512,7 @@ class ParserTestCase extends TestCase {
     /* Test a Positional with unlimited nargs followed by one with 1 */
 
     argument_signatures = [Sig('foo', { nargs: '*' }), Sig('bar', { nargs: 1 })]
-    failures = ['', '--foo', ]
+    failures = ['', '--foo',]
     successes = [
         ['a', NS({ foo: [], bar: ['a'] })],
         ['a b', NS({ foo: ['a'], bar: ['b'] })],
@@ -1321,14 +1549,21 @@ class ParserTestCase extends TestCase {
     /* Test three Positionals: no nargs, unlimited nargs and 1 nargs */
 
     argument_signatures = [
+        Sig('-x'),
         Sig('foo'),
         Sig('bar', { nargs: '*' }),
         Sig('baz', { nargs: 1 }),
     ]
-    failures = ['', '--foo', 'a']
+    failures = ['', '--foo', 'a', 'a b -x X c']
     successes = [
-        ['a b', NS({ foo: 'a', bar: [], baz: ['b'] })],
-        ['a b c', NS({ foo: 'a', bar: ['b'], baz: ['c'] })],
+        ['a b', NS({ x: undefined, foo: 'a', bar: [], baz: ['b'] })],
+        ['a b c', NS({ x: undefined, foo: 'a', bar: ['b'], baz: ['c'] })],
+        ['-x X a b', NS({ x: 'X', foo: 'a', bar: [], baz: ['b'] })],
+        ['a -x X b', NS({ x: 'X', foo: 'a', bar: [], baz: ['b'] })],
+        ['a b -x X', NS({ x: 'X', foo: 'a', bar: [], baz: ['b'] })],
+        ['-x X a b c', NS({ x: 'X', foo: 'a', bar: ['b'], baz: ['c'] })],
+        ['a -x X b c', NS({ x: 'X', foo: 'a', bar: ['b'], baz: ['c'] })],
+        ['a b c -x X', NS({ x: 'X', foo: 'a', bar: ['b'], baz: ['c'] })],
     ]
 }).run()
 
@@ -1337,14 +1572,22 @@ class ParserTestCase extends TestCase {
     /* Test three Positionals: no nargs, one or more nargs and 1 nargs */
 
     argument_signatures = [
+        Sig('-x'),
         Sig('foo'),
         Sig('bar', { nargs: '+' }),
         Sig('baz', { nargs: 1 }),
     ]
-    failures = ['', '--foo', 'a', 'b']
+    failures = ['', '--foo', 'a', 'b', 'a b -x X c d', 'a b c -x X d']
     successes = [
-        ['a b c', NS({ foo: 'a', bar: ['b'], baz: ['c'] })],
-        ['a b c d', NS({ foo: 'a', bar: ['b', 'c'], baz: ['d'] })],
+        ['a b c', NS({ x: undefined, foo: 'a', bar: ['b'], baz: ['c'] })],
+        ['a b c d', NS({ x: undefined, foo: 'a', bar: ['b', 'c'], baz: ['d'] })],
+        ['-x X a b c', NS({ x: 'X', foo: 'a', bar: ['b'], baz: ['c'] })],
+        ['a -x X b c', NS({ x: 'X', foo: 'a', bar: ['b'], baz: ['c'] })],
+        ['a b -x X c', NS({ x: 'X', foo: 'a', bar: ['b'], baz: ['c'] })],
+        ['a b c -x X', NS({ x: 'X', foo: 'a', bar: ['b'], baz: ['c'] })],
+        ['-x X a b c d', NS({ x: 'X', foo: 'a', bar: ['b', 'c'], baz: ['d'] })],
+        ['a -x X b c d', NS({ x: 'X', foo: 'a', bar: ['b', 'c'], baz: ['d'] })],
+        ['a b c d -x X', NS({ x: 'X', foo: 'a', bar: ['b', 'c'], baz: ['d'] })],
     ]
 }).run()
 
@@ -1353,14 +1596,21 @@ class ParserTestCase extends TestCase {
     /* Test three Positionals: no nargs, optional narg and 1 nargs */
 
     argument_signatures = [
+        Sig('-x'),
         Sig('foo'),
         Sig('bar', { nargs: '?', default: 0.625 }),
         Sig('baz', { nargs: 1 }),
     ]
-    failures = ['', '--foo', 'a']
+    failures = ['', '--foo', 'a', 'a b -x X c']
     successes = [
-        ['a b', NS({ foo: 'a', bar: 0.625, baz: ['b'] })],
-        ['a b c', NS({ foo: 'a', bar: 'b', baz: ['c'] })],
+        ['a b', NS({ x: undefined, foo: 'a', bar: 0.625, baz: ['b'] })],
+        ['a b c', NS({ x: undefined, foo: 'a', bar: 'b', baz: ['c'] })],
+        ['-x X a b', NS({ x: 'X', foo: 'a', bar: 0.625, baz: ['b'] })],
+        ['a -x X b', NS({ x: 'X', foo: 'a', bar: 0.625, baz: ['b'] })],
+        ['a b -x X', NS({ x: 'X', foo: 'a', bar: 0.625, baz: ['b'] })],
+        ['-x X a b c', NS({ x: 'X', foo: 'a', bar: 'b', baz: ['c'] })],
+        ['a -x X b c', NS({ x: 'X', foo: 'a', bar: 'b', baz: ['c'] })],
+        ['a b c -x X', NS({ x: 'X', foo: 'a', bar: 'b', baz: ['c'] })],
     ]
 }).run()
 
@@ -1445,6 +1695,19 @@ class ParserTestCase extends TestCase {
     ]
 }).run()
 
+;(new class TestPositionalsActionExtend extends ParserTestCase {
+    /* Test the 'extend' action */
+
+    argument_signatures = [
+        Sig('spam', { action: 'extend' }),
+        Sig('spam', { action: 'extend', nargs: 2 }),
+    ]
+    failures = ['', '--foo', 'a', 'a b', 'a b c d']
+    successes = [
+        ['a b c', NS({ spam: ['a', 'b', 'c'] })],
+    ]
+}).run()
+
 // ========================================
 // Combined optionals and positionals tests
 // ========================================
@@ -1480,6 +1743,32 @@ class ParserTestCase extends TestCase {
         ['a', NS({ x: 'a', y: false })],
         ['-k4', NS({ x: undefined, y: true })],
         ['-k4 a', NS({ x: 'a', y: true })],
+    ]
+}).run()
+
+;(new class TestOptionalsAndPositionalsAppend extends ParserTestCase {
+    argument_signatures = [
+        Sig('foo', { nargs: '*', action: 'append' }),
+        Sig('--bar'),
+    ]
+    failures = ['-foo']
+    successes = [
+        ['a b', NS({ foo: [['a', 'b']], bar: undefined })],
+        ['--bar a b', NS({ foo: [['b']], bar: 'a' })],
+        ['a b --bar c', NS({ foo: [['a', 'b']], bar: 'c' })],
+    ]
+}).run()
+
+;(new class TestOptionalsAndPositionalsExtend extends ParserTestCase {
+    argument_signatures = [
+        Sig('foo', { nargs: '*', action: 'extend' }),
+        Sig('--bar'),
+    ]
+    failures = ['-foo']
+    successes = [
+        ['a b', NS({ foo: ['a', 'b'], bar: undefined })],
+        ['--bar a b', NS({ foo: ['b'], bar: 'a' })],
+        ['a b --bar c', NS({ foo: ['a', 'b'], bar: 'c' })],
     ]
 }).run()
 
@@ -1549,6 +1838,9 @@ class ParserTestCase extends TestCase {
     successes = [
         ['X', NS({ x: 'X', y: [], z: undefined })],
         ['-z Z X', NS({ x: 'X', y: [], z: 'Z' })],
+        ['-z Z X A B', NS({ x: 'X', y: ['A', 'B'], z: 'Z' })],
+        ['X -z Z A B', NS({ x: 'X', y: ['-z', 'Z', 'A', 'B'], z: undefined })],
+        ['X A -z Z B', NS({ x: 'X', y: ['A', '-z', 'Z', 'B'], z: undefined })],
         ['X A B -z Z', NS({ x: 'X', y: ['A', 'B', '-z', 'Z'], z: undefined })],
         ['X Y --foo', NS({ x: 'X', y: ['Y', '--foo'], z: undefined })],
     ]
@@ -1587,18 +1879,24 @@ class ParserTestCase extends TestCase {
     /* Test actions with suppressed defaults */
 
     argument_signatures = [
-        Sig('foo', { nargs: '?', default: argparse.SUPPRESS }),
-        Sig('bar', { nargs: '*', default: argparse.SUPPRESS }),
+        Sig('foo', { nargs: '?', type: 'int', default: argparse.SUPPRESS }),
+        Sig('bar', { nargs: '*', type: 'int', default: argparse.SUPPRESS }),
         Sig('--baz', { action: 'store_true', default: argparse.SUPPRESS }),
+        Sig('--qux', { nargs: '?', type: 'int', default: argparse.SUPPRESS }),
+        Sig('--quux', { nargs: '*', type: 'int', default: argparse.SUPPRESS }),
     ]
-    failures = ['-x']
+    failures = ['-x', 'a', '1 a']
     successes = [
         ['', NS({})],
-        ['a', NS({ foo: 'a' })],
-        ['a b', NS({ foo: 'a', bar: ['b'] })],
+        ['1', NS({ foo: 1 })],
+        ['1 2', NS({ foo: 1, bar: [2] })],
         ['--baz', NS({ baz: true })],
-        ['a --baz', NS({ foo: 'a', baz: true })],
-        ['--baz a b', NS({ foo: 'a', bar: ['b'], baz: true })],
+        ['1 --baz', NS({ foo: 1, baz: true })],
+        ['--baz 1 2', NS({ foo: 1, bar: [2], baz: true })],
+        ['--qux', NS({ qux: undefined })],
+        ['--qux 1', NS({ qux: 1 })],
+        ['--quux', NS({ quux: [] })],
+        ['--quux 1 2', NS({ quux: [1, 2] })],
     ]
 }).run()
 
@@ -1646,21 +1944,21 @@ class ParserTestCase extends TestCase {
 }).run()
 
 
-let TempDirMixin_ParserTestCase = TempDirMixin(ParserTestCase)
+const TempDirMixin_ParserTestCase = TempDirMixin(ParserTestCase)
 
 ;(new class TestArgumentsFromFile extends TempDirMixin_ParserTestCase {
     /* Test reading arguments from a file */
 
-    setUp() {
+    setUp () {
         super.setUp()
-        let file_texts = [
-            ['hello', 'hello world!\n'],
+        const file_texts = [
+            ['hello', this.hello + '\n'],
             ['recursive', '-a\n' +
                           'A\n' +
                           '@hello'],
             ['invalid', '@no-such-path\n'],
         ]
-        for (let [ path, text ] of file_texts) {
+        for (const [path, text] of file_texts) {
             fs.writeFileSync(path, text)
         }
     }
@@ -1672,13 +1970,14 @@ let TempDirMixin_ParserTestCase = TempDirMixin(ParserTestCase)
         Sig('y', { nargs: '+' }),
     ]
     failures = ['', '-b', 'X', '@invalid', '@missing']
+    hello = 'hello world!é'
     successes = [
         ['X Y', NS({ a: undefined, x: 'X', y: ['Y'] })],
         ['X -a A Y Z', NS({ a: 'A', x: 'X', y: ['Y', 'Z'] })],
-        ['@hello X', NS({ a: undefined, x: 'hello world!', y: ['X'] })],
-        ['X @hello', NS({ a: undefined, x: 'X', y: ['hello world!'] })],
-        ['-a B @recursive Y Z', NS({ a: 'A', x: 'hello world!', y: ['Y', 'Z'] })],
-        ['X @recursive Z -a B', NS({ a: 'B', x: 'X', y: ['hello world!', 'Z'] })],
+        ['@hello X', NS({ a: undefined, x: this.hello, y: ['X'] })],
+        ['X @hello', NS({ a: undefined, x: 'X', y: [this.hello] })],
+        ['-a B @recursive Y Z', NS({ a: 'A', x: this.hello, y: ['Y', 'Z'] })],
+        ['X @recursive Z -a B', NS({ a: 'B', x: 'X', y: [this.hello, 'Z'] })],
         [["-a", "", "X", "Y"], NS({ a: '', x: 'X', y: ['Y'] })],
     ]
 }).run()
@@ -1687,20 +1986,20 @@ let TempDirMixin_ParserTestCase = TempDirMixin(ParserTestCase)
 ;(new class TestArgumentsFromFileConverter extends TempDirMixin_ParserTestCase {
     /* Test reading arguments from a file */
 
-    setUp() {
+    setUp () {
         super.setUp()
-        let file_texts = [
+        const file_texts = [
             ['hello', 'hello world!\n'],
         ]
-        for (let [ path, text ] of file_texts) {
+        for (const [path, text] of file_texts) {
             fs.writeFileSync(path, text)
         }
     }
 
     FromFileConverterArgumentParser = class FromFileConverterArgumentParser extends ErrorRaisingArgumentParser {
 
-        * convert_arg_line_to_args(arg_line) {
-            for (let arg of arg_line.split(/\s+/).filter(Boolean)) {
+        * convert_arg_line_to_args (arg_line) {
+            for (const arg of arg_line.split(/\s+/).filter(Boolean)) {
                 if (!arg.trim()) {
                     continue
                 }
@@ -1725,26 +2024,55 @@ let TempDirMixin_ParserTestCase = TempDirMixin(ParserTestCase)
 // Type conversion tests
 // =====================
 
+function FileType (...args) {
+    const emitWarning = process.emitWarning
+    process.emitWarning = () => {}
+    try {
+        return argparse.FileType(...args)
+    } finally {
+        process.emitWarning = emitWarning
+    }
+}
+
+
+;(new class TestFileTypeDeprecation extends TestCase {
+
+    test () {
+        const warnings = []
+        const emitWarning = process.emitWarning
+        process.emitWarning = (warning, type) => warnings.push([warning, type])
+        try {
+            argparse.FileType()
+        } finally {
+            process.emitWarning = emitWarning
+        }
+        this.assertEqual(1, warnings.length)
+        this.assertRegex(warnings[0][0], /FileType is deprecated/)
+        this.assertEqual('PendingDeprecationWarning', warnings[0][1])
+    }
+}).run()
+
+
 ;(new class TestFileTypeRepr extends TestCase {
 
-    test_r() {
-        let type = argparse.FileType('r')
+    test_r () {
+        const type = FileType('r')
         this.assertEqual("FileType('r')", sub('%r', type))
     }
 
-    test_r_utf8() {
-        let type = argparse.FileType('r', { encoding: 'utf8' })
+    test_r_utf8 () {
+        const type = FileType('r', { encoding: 'utf8' })
         this.assertEqual("FileType('r', encoding='utf8')", sub('%r', type))
     }
 
-    test_w_utf8_0o400() {
-        let type = argparse.FileType('w', { encoding: 'utf8', mode: 0o400 })
+    test_w_utf8_0o400 () {
+        const type = FileType('w', { encoding: 'utf8', mode: 0o400 })
         this.assertEqual("FileType('w', encoding='utf8', mode=0o400)",
                          sub('%r', type))
     }
 
-    test_w_utf8_close() {
-        let type = argparse.FileType('w', { encoding: 'utf8', emitClose: true })
+    test_w_utf8_close () {
+        const type = FileType('w', { encoding: 'utf8', emitClose: true })
         this.assertEqual("FileType('w', encoding='utf8', emitClose=true)",
                          sub('%r', type))
     }
@@ -1752,19 +2080,19 @@ let TempDirMixin_ParserTestCase = TempDirMixin(ParserTestCase)
 
 
 class StdStreamComparer {
-    constructor(attr) {
+    constructor (attr) {
         this.attr = attr
     }
 }
 
-let eq_stdin = new StdStreamComparer('stdin')
-let eq_stdout = new StdStreamComparer('stdout')
-let eq_stderr = new StdStreamComparer('stderr')
+const eq_stdin = new StdStreamComparer('stdin')
+const eq_stdout = new StdStreamComparer('stdout')
+const eq_stderr = new StdStreamComparer('stderr')
 
 
 class FileTypeTestCase extends ParserTestCase {
-    _normalize_ns(ns) {
-        for (let key of Object.keys(ns)) {
+    _normalize_ns (ns) {
+        for (const key of Object.keys(ns)) {
             if (ns[key] === process.stdout) {
                 ns[key] = eq_stdout
             } else if (ns[key] === process.stderr) {
@@ -1772,24 +2100,31 @@ class FileTypeTestCase extends ParserTestCase {
             } else if (ns[key] === process.stdin) {
                 ns[key] = eq_stdin
             } else if (ns[key] instanceof stream.Readable && ns[key].fd) {
-                let fd = ns[key].fd
-                ns[key] = new RFile(fs.readFileSync(fd, 'utf8'))
+                const fd = ns[key].fd
+                const file_name = path.basename(ns[key].path)
+                const contents = fs.readFileSync(fd, 'utf8')
                 fs.closeSync(fd)
+                ns[key] = new RFile(file_name, contents)
             } else if (ns[key] instanceof stream.Writable && ns[key].fd) {
-                let fd = ns[key].fd
-                ns[key] = new WFile()
+                const fd = ns[key].fd
+                const file_name = path.basename(ns[key].path)
+                const contents = 'Check that file is writable.'
+                fs.writeSync(fd, contents)
                 fs.closeSync(fd)
+                ns[key] = new WFile(file_name,
+                                    fs.readFileSync(ns[key].path, 'utf8'))
             }
         }
         return ns
     }
 }
 
-let TempDirMixin_FileTypeTestCase = TempDirMixin(FileTypeTestCase)
+const TempDirMixin_FileTypeTestCase = TempDirMixin(FileTypeTestCase)
 
 class RFile {
-    constructor(name) {
+    constructor (name, contents = name) {
         this.name = name
+        this.contents = contents
     }
 }
 
@@ -1797,17 +2132,17 @@ class RFile {
 ;(new class TestFileTypeR extends TempDirMixin_FileTypeTestCase {
     /* Test the FileType option/argument type for reading files */
 
-    setUp() {
+    setUp () {
         super.setUp()
-        for (let file_name of ['foo', 'bar']) {
+        for (const file_name of ['foo', 'bar']) {
             fs.writeFileSync(path.join(this.temp_dir, file_name), file_name)
         }
         this.create_readonly_file('readonly')
     }
 
     argument_signatures = [
-        Sig('-x', { type: argparse.FileType() }),
-        Sig('spam', { type: argparse.FileType('r') }),
+        Sig('-x', { type: FileType() }),
+        Sig('spam', { type: FileType('r') }),
     ]
     failures = ['-x', '', 'non-existent-file.txt']
     successes = [
@@ -1821,15 +2156,15 @@ class RFile {
 
 ;(new class TestFileTypeDefaults extends TempDirMixin_FileTypeTestCase {
     /* Test that a file is not created unless the default is needed */
-    setUp() {
+    setUp () {
         super.setUp()
-        let file = fs.openSync(path.join(this.temp_dir, 'good'), 'w')
+        const file = fs.openSync(path.join(this.temp_dir, 'good'), 'w')
         fs.writeSync(file, 'good')
         fs.closeSync(file)
     }
 
     argument_signatures = [
-        Sig('-c', { type: argparse.FileType('r'), default: 'no-file.txt' }),
+        Sig('-c', { type: FileType('r'), default: 'no-file.txt' }),
     ]
     // should provoke no such file error
     failures = ['']
@@ -1839,7 +2174,9 @@ class RFile {
 
 
 class WFile {
-    constructor() {
+    constructor (name, contents = 'Check that file is writable.') {
+        this.name = name
+        this.contents = contents
     }
 }
 
@@ -1847,14 +2184,14 @@ class WFile {
 ;(new class TestFileTypeW extends TempDirMixin_FileTypeTestCase {
     /* Test the FileType option/argument type for writing files */
 
-    setUp() {
+    setUp () {
         super.setUp()
         this.create_readonly_file('readonly')
     }
 
     argument_signatures = [
-        Sig('-x', { type: argparse.FileType('w') }),
-        Sig('spam', { type: argparse.FileType('w') }),
+        Sig('-x', { type: FileType('w') }),
+        Sig('spam', { type: FileType('w') }),
     ]
     failures = ['-x', '', 'readonly']
     successes = [
@@ -1866,15 +2203,64 @@ class WFile {
 }).run()
 
 
+;(new class TestFileTypeStreams extends TempDirMixin(TestCase) {
+
+    async test_read_stream () {
+        fs.writeFileSync('readable', 'contents')
+        const file = FileType('r')('readable')
+        const chunks = []
+        const closed = once(file, 'close')
+        file.on('data', chunk => chunks.push(chunk))
+        await closed
+        this.assertEqual('readable', file.path)
+        this.assertEqual('contents', Buffer.concat(chunks).toString())
+        this.assertEqual(true, file.closed)
+    }
+
+    async test_write_stream () {
+        const file = FileType('w')('writable')
+        const closed = once(file, 'close')
+        file.end('contents')
+        await closed
+        this.assertEqual('writable', file.path)
+        this.assertEqual('contents', fs.readFileSync('writable', 'utf8'))
+        this.assertEqual(true, file.closed)
+    }
+}).run()
+
+
+;(new class TestFileTypeDashModes extends TestCase {
+
+    test_read_modes () {
+        for (const flags of ['r', 'rb']) {
+            assert.strictEqual(FileType(flags)('-'), process.stdin)
+        }
+    }
+
+    test_write_modes () {
+        for (const flags of ['w', 'wb', 'a', 'ab', 'x', 'xb']) {
+            assert.strictEqual(FileType(flags)('-'), process.stdout)
+        }
+    }
+}).run()
+
+
+;(new class TestFileTypeInvalid extends TestCase {
+    test_invalid_file_type () {
+        this.assertRaises(TypeError, () => FileType('b')('-test'))
+    }
+}).run()
+
+
 ;(new class TestFileTypeMissingInitialization extends TestCase {
     /*
      *  Test that add_argument throws an error if FileType class
      *  object was passed instead of instance of FileType
      */
 
-    test() {
-        let parser = argparse.ArgumentParser()
-        let cm = this.assertRaises(TypeError, () =>
+    test () {
+        const parser = argparse.ArgumentParser()
+        const cm = this.assertRaises(TypeError, () =>
             parser.add_argument('-x', { type: argparse.FileType }))
 
         this.assertEqual(sub(
@@ -1906,7 +2292,7 @@ class WFile {
     /* Test a user-defined option/argument type */
 
     MyType = class MyType extends TestCase {
-        constructor(value) {
+        constructor (value) {
             super()
             this.value = value
         }
@@ -1928,7 +2314,7 @@ class WFile {
     /* Test a classic class type */
 
     C = class C {
-        constructor(value) {
+        constructor (value) {
             this.value = value
         }
     }
@@ -1948,12 +2334,12 @@ class WFile {
 ;(new class TestTypeRegistration extends TestCase {
     /* Test a user-defined type by registering it */
 
-    test() {
+    test () {
 
-        let get_my_type = string =>
+        const get_my_type = string =>
             sub('my_type{%s}', string)
 
-        let parser = argparse.ArgumentParser()
+        const parser = argparse.ArgumentParser()
         parser.register('type', 'my_type', get_my_type)
         parser.add_argument('-x', { type: 'my_type' })
         parser.add_argument('y', { type: 'my_type' })
@@ -1975,14 +2361,14 @@ class WFile {
 
     OptionalAction = class OptionalAction extends argparse.Action {
 
-        call(parser, namespace, value, option_string = undefined) {
+        call (parser, namespace, value, option_string = undefined) {
             try {
                 // check destination and option string
                 assert(this.dest === 'spam', sub('dest: %s', this.dest))
                 assert(option_string === '-s', sub('flag: %s', option_string))
                 // when option is before argument, badger=2, and when
                 // option is after argument, badger=<whatever was set>
-                let expected_ns = NS({ spam: 0.25 })
+                const expected_ns = NS({ spam: 0.25 })
                 if ([0.125, 0.625].includes(value)) {
                     expected_ns.badger = 2
                 } else if ([2.0].includes(value)) {
@@ -1995,7 +2381,7 @@ class WFile {
                         JSON.stringify(namespace, Object.keys(namespace).sort()),
                     sub('expected %s, got %s', expected_ns, namespace))
             } catch (err) {
-                let e = err.message
+                const e = err.message
                 throw new ArgumentParserError(sub('opt_action failed: %s', e))
             }
             namespace.spam = value
@@ -2004,7 +2390,7 @@ class WFile {
 
     PositionalAction = class PositionalAction extends argparse.Action {
 
-        call(parser, namespace, value, option_string = undefined) {
+        call (parser, namespace, value, option_string = undefined) {
             try {
                 assert(option_string === undefined, sub('option_string: %s',
                                                         option_string))
@@ -2012,7 +2398,7 @@ class WFile {
                 assert(this.dest === 'badger', sub('dest: %s', this.dest))
                 // when argument is before option, spam=0.25, and when
                 // option is after argument, spam=<whatever was set>
-                let expected_ns = NS({ badger: 2 })
+                const expected_ns = NS({ badger: 2 })
                 if ([42, 84].includes(value)) {
                     expected_ns.spam = 0.25
                 } else if ([1].includes(value)) {
@@ -2027,7 +2413,7 @@ class WFile {
                         JSON.stringify(namespace, Object.keys(namespace).sort()),
                     sub('expected %s, got %s', expected_ns, namespace))
             } catch (err) {
-                let e = err.message
+                const e = err.message
                 throw new ArgumentParserError(sub('arg_action failed: %s', e))
             }
             namespace.badger = value
@@ -2055,14 +2441,14 @@ class WFile {
 
     MyAction = class MyAction extends argparse.Action {
 
-        call(parser, namespace, values/*, option_string = undefined*/) {
+        call (parser, namespace, values/*, option_string = undefined */) {
             namespace[this.dest] = sub('foo[%s]', values)
         }
     }
 
-    test() {
+    test () {
 
-        let parser = argparse.ArgumentParser()
+        const parser = argparse.ArgumentParser()
         parser.register('action', 'my_action', this.MyAction)
         parser.add_argument('badger', { action: 'my_action' })
 
@@ -2082,6 +2468,155 @@ class WFile {
     ]
 }).run()
 
+;(new class TestNegativeNumber extends ParserTestCase {
+    /* Test parsing negative numbers */
+
+    argument_signatures = [
+        Sig('--int', { type: 'int' }),
+        Sig('--float', { type: 'float' }),
+    ]
+    failures = [
+        '--float -_.45',
+        '--float -1__000.0',
+        '--float -1.0.0',
+        '--int -1__000',
+        '--int -1.0',
+    ]
+    successes = [
+        ['--int -1000 --float -1000.0', NS({ int: -1000, float: -1000.0 })],
+        ['--int -1_000 --float -1_000.0', NS({ int: -1000, float: -1000.0 })],
+        ['--int -1_000_000 --float -1_000_000.0', NS({ int: -1000000, float: -1000000.0 })],
+        ['--float -1_000.0', NS({ int: undefined, float: -1000.0 })],
+        ['--float -1_000_000.0_0', NS({ int: undefined, float: -1000000.0 })],
+        ['--float -.5', NS({ int: undefined, float: -0.5 })],
+        ['--float -.5_000', NS({ int: undefined, float: -0.5 })],
+        ['--float -1e3', NS({ int: undefined, float: -1000 })],
+        ['--float -1e-3', NS({ int: undefined, float: -0.001 })],
+    ]
+}).run()
+
+
+;(new class TestArgumentAndSubparserSuggestions extends TestCase {
+    /* Test error handling and suggestion when a user makes a typo */
+
+    test_wrong_argument_error_with_suggestions () {
+        const parser = new ErrorRaisingArgumentParser({ suggest_on_error: true })
+        parser.add_argument('foo', { choices: ['bar', 'baz'] })
+        const cm = this.assertRaises(ArgumentParserError, () =>
+            parser.parse_args(['bazz']))
+        assert(cm.exception.stderr.includes(
+            "error: argument foo: invalid choice: 'bazz', maybe you meant 'baz'? " +
+            "(choose from 'bar', 'baz')"))
+    }
+
+    test_wrong_argument_error_no_suggestions () {
+        const parser = new ErrorRaisingArgumentParser({ suggest_on_error: false })
+        parser.add_argument('foo', { choices: ['bar', 'baz'] })
+        const cm = this.assertRaises(ArgumentParserError, () =>
+            parser.parse_args(['bazz']))
+        assert(cm.exception.stderr.includes(
+            "error: argument foo: invalid choice: 'bazz' (choose from 'bar', 'baz')"))
+    }
+
+    test_wrong_argument_subparsers_with_suggestions () {
+        const parser = new ErrorRaisingArgumentParser({ suggest_on_error: true })
+        const subparsers = parser.add_subparsers({ required: true })
+        subparsers.add_parser('foo')
+        subparsers.add_parser('bar')
+        const cm = this.assertRaises(ArgumentParserError, () =>
+            parser.parse_args(['baz']))
+        assert(cm.exception.stderr.includes(
+            "error: argument {foo,bar}: invalid choice: 'baz', maybe you meant " +
+            "'bar'? (choose from 'foo', 'bar')"))
+    }
+
+    test_wrong_argument_subparsers_no_suggestions () {
+        const parser = new ErrorRaisingArgumentParser({ suggest_on_error: false })
+        const subparsers = parser.add_subparsers({ required: true })
+        subparsers.add_parser('foo')
+        subparsers.add_parser('bar')
+        const cm = this.assertRaises(ArgumentParserError, () =>
+            parser.parse_args(['baz']))
+        assert(cm.exception.stderr.includes(
+            "error: argument {foo,bar}: invalid choice: 'baz' (choose from 'foo', 'bar')"))
+    }
+
+    test_wrong_argument_no_suggestion_implicit () {
+        const parser = new ErrorRaisingArgumentParser()
+        parser.add_argument('foo', { choices: ['bar', 'baz'] })
+        const cm = this.assertRaises(ArgumentParserError, () =>
+            parser.parse_args(['bazz']))
+        assert(cm.exception.stderr.includes(
+            "error: argument foo: invalid choice: 'bazz' (choose from 'bar', 'baz')"))
+    }
+
+    test_suggestions_choices_empty () {
+        const parser = new ErrorRaisingArgumentParser({ suggest_on_error: true })
+        parser.add_argument('foo', { choices: [] })
+        const cm = this.assertRaises(ArgumentParserError, () =>
+            parser.parse_args(['bazz']))
+        assert(cm.exception.stderr.includes(
+            "error: argument foo: invalid choice: 'bazz' (choose from )"))
+    }
+
+    test_suggestions_choices_int () {
+        const parser = new ErrorRaisingArgumentParser({ suggest_on_error: true })
+        parser.add_argument('foo', { choices: [1, 2] })
+        const cm = this.assertRaises(ArgumentParserError, () =>
+            parser.parse_args(['3']))
+        assert(cm.exception.stderr.includes(
+            "error: argument foo: invalid choice: '3' (choose from '1', '2')"))
+    }
+
+    test_suggestions_choices_mixed_types () {
+        const parser = new ErrorRaisingArgumentParser({ suggest_on_error: true })
+        parser.add_argument('foo', { choices: [1, '2'] })
+        const cm = this.assertRaises(ArgumentParserError, () =>
+            parser.parse_args(['3']))
+        assert(cm.exception.stderr.includes(
+            "error: argument foo: invalid choice: '3' (choose from '1', '2')"))
+    }
+}).run()
+
+
+;(new class TestInvalidAction extends TestCase {
+    /* Test invalid user defined Action */
+
+    ActionWithoutCall = class ActionWithoutCall extends argparse.Action {}
+
+    test_invalid_type () {
+        const parser = argparse.ArgumentParser()
+        parser.add_argument('--foo', { action: this.ActionWithoutCall })
+        this.assertRaises(Error, () => parser.parse_args(['--foo', 'bar']))
+    }
+
+    test_modified_invalid_action () {
+        const parser = argparse.ArgumentParser({ exit_on_error: false })
+        const action = parser.add_argument('--foo')
+        action.type = 1
+        let cm = this.assertRaises(TypeError, () => parser.parse_args(['--foo', 'bar']))
+        this.assertRegex(String(cm.exception), /1 is not callable/)
+        action.type = []
+        cm = this.assertRaises(TypeError, () => parser.parse_args(['--foo', 'bar']))
+        this.assertRegex(String(cm.exception), /\[\] is not callable/)
+        // It is impossible to distinguish a TypeError raised due to a mismatch
+        // of the required function arguments from a TypeError raised for an incorrect
+        // argument value, and using the heavy inspection machinery is not worthwhile
+        // as it does not reliably work in all cases.
+        // Therefore, a generic ArgumentError is raised to handle this logical error.
+        function pow (a, b) {
+            if (b === undefined) throw new TypeError('missing argument')
+            return Math.pow(a, b)
+        }
+        action.type = pow
+        cm = this.assertRaises(argparse.ArgumentError, () =>
+            parser.parse_args(['--foo', 'bar']))
+        this.assertRegex(String(cm.exception),
+            /argument --foo: invalid pow value: 'bar'/)
+    }
+}).run()
+
+
 // ================
 // Subparsers tests
 // ================
@@ -2089,22 +2624,25 @@ class WFile {
 ;(new class TestAddSubparsers extends TestCase {
     /* Test the add_subparsers method */
 
-    assertArgumentParserError(...args) {
+    force_color = false
+
+    assertArgumentParserError (...args) {
         this.assertRaises(ArgumentParserError, ...args)
     }
 
-    _get_parser({ subparser_help = false, prefix_chars = undefined, aliases = false } = {}) {
+    _get_parser ({ subparser_help = false, prefix_chars = undefined,
+                   aliases = false, usage = undefined } = {}) {
         // create a parser with a subparsers argument
         let parser
 
         if (prefix_chars) {
             parser = new ErrorRaisingArgumentParser({
-                prog: 'PROG', description: 'main description', prefix_chars })
+                prog: 'PROG', description: 'main description', usage, prefix_chars })
             parser.add_argument(
                 prefix_chars[0].repeat(2) + 'foo', { action: 'store_true', help: 'foo help' })
         } else {
             parser = new ErrorRaisingArgumentParser({
-                prog: 'PROG', description: 'main description' })
+                prog: 'PROG', description: 'main description', usage })
             parser.add_argument(
                 '--foo', { action: 'store_true', help: 'foo help' })
         }
@@ -2112,43 +2650,47 @@ class WFile {
             'bar', { type: 'float', help: 'bar help' })
 
         // check that only one subparsers argument can be added
-        let subparsers_kwargs = {required: false}
+        const subparsers_kwargs = {required: false}
         if (aliases) {
             subparsers_kwargs.metavar = 'COMMAND'
             subparsers_kwargs.title = 'commands'
         } else {
             subparsers_kwargs.help = 'command help'
         }
-        let subparsers = parser.add_subparsers(subparsers_kwargs)
-        this.assertArgumentParserError(() => parser.add_subparsers())
+        const subparsers = parser.add_subparsers(subparsers_kwargs)
+        const cm = this.assertRaises(TypeError, () => parser.add_subparsers())
+        this.assertRegex(cm.exception.message, /cannot have multiple subparser arguments/)
 
         // add first sub-parser
-        let parser1_kwargs = { description: '1 description' }
+        const parser1_kwargs = { description: '1 description' }
         if (subparser_help) {
             parser1_kwargs.help = '1 help'
         }
         if (aliases) {
             parser1_kwargs.aliases = ['1alias1', '1alias2']
         }
-        let parser1 = subparsers.add_parser('1', parser1_kwargs)
+        const parser1 = subparsers.add_parser('1', parser1_kwargs)
         parser1.add_argument('-w', { type: 'int', help: 'w help' })
-        parser1.add_argument('x', { choices: 'abc', help: 'x help' })
+        parser1.add_argument('x', { choices: ['a', 'b', 'c'], help: 'x help' })
 
         // add second sub-parser
-        let parser2_kwargs = { description: '2 description' }
+        const parser2_kwargs = { description: '2 description' }
         if (subparser_help) {
             parser2_kwargs.help = '2 help'
         }
-        let parser2 = subparsers.add_parser('2', parser2_kwargs)
-        parser2.add_argument('-y', { choices: '123', help: 'y help' })
+        const parser2 = subparsers.add_parser('2', parser2_kwargs)
+        parser2.add_argument('-y', { choices: ['1', '2', '3'], help: 'y help' })
         parser2.add_argument('z', { type: 'str', nargs: '*', help: 'z help' })
 
         // add third sub-parser
-        let parser3_kwargs = { description: '3 description' }
+        const parser3_kwargs = {
+            description: '3 description',
+            usage: 'PROG --foo bar 3 t ...'
+        }
         if (subparser_help) {
             parser3_kwargs.help = '3 help'
         }
-        let parser3 = subparsers.add_parser('3', parser3_kwargs)
+        const parser3 = subparsers.add_parser('3', parser3_kwargs)
         parser3.add_argument('t', { type: 'int', help: 't help' })
         parser3.add_argument('u', { nargs: '...', help: 'u help' })
 
@@ -2156,117 +2698,255 @@ class WFile {
         return parser
     }
 
-    setUp() {
+    setUp () {
         super.setUp()
         this.parser = this._get_parser()
         this.command_help_parser = this._get_parser({ subparser_help: true })
     }
 
-    test_parse_args_failures() {
+    test_parse_args_failures () {
         // check some failure cases:
-        for (let args_str of ['', 'a', 'a a', '0.5 a', '0.5 1',
+        for (const args_str of ['', 'a', 'a a', '0.5 a', '0.5 1',
                               '0.5 1 -y', '0.5 2 -w']) {
-            let args = args_str.split(/\s+/).filter(Boolean)
+            const args = args_str.split(/\s+/).filter(Boolean)
             this.assertArgumentParserError(() => this.parser.parse_args(args))
         }
     }
 
-    test_parse_args() {
+    test_parse_args_failures_details () {
+        for (const [args_str, usage_str, error_str] of [
+            [
+                '',
+                'usage: PROG [-h] [--foo] bar {1,2,3} ...',
+                'PROG: error: the following arguments are required: bar'
+            ],
+            [
+                '0.5 1 -y',
+                'usage: PROG bar 1 [-h] [-w W] {a,b,c}',
+                'PROG bar 1: error: the following arguments are required: x'
+            ],
+            [
+                '0.5 3',
+                'usage: PROG --foo bar 3 t ...',
+                'PROG bar 3: error: the following arguments are required: t'
+            ]
+        ]) {
+            const args = args_str.split(/\s+/).filter(Boolean)
+            const cm = this.assertRaises(ArgumentParserError, () =>
+                this.parser.parse_args(args))
+            this.assertEqual(cm.exception.m, 'SystemExit')
+            this.assertEqual(cm.exception.stderr, `${usage_str}\n${error_str}\n`)
+        }
+    }
+
+    test_parse_args_failures_details_custom_usage () {
+        const parser = this._get_parser({
+            usage: 'PROG [--foo] bar 1 [-w W] {a,b,c}\n' +
+                   '       PROG --foo bar 3 t ...'
+        })
+        for (const [args_str, usage_str, error_str] of [
+            [
+                '',
+                'usage: PROG [--foo] bar 1 [-w W] {a,b,c}\n' +
+                '       PROG --foo bar 3 t ...',
+                'PROG: error: the following arguments are required: bar'
+            ],
+            [
+                '0.5 1 -y',
+                'usage: PROG bar 1 [-h] [-w W] {a,b,c}',
+                'PROG bar 1: error: the following arguments are required: x'
+            ],
+            [
+                '0.5 3',
+                'usage: PROG --foo bar 3 t ...',
+                'PROG bar 3: error: the following arguments are required: t'
+            ]
+        ]) {
+            const args = args_str.split(/\s+/).filter(Boolean)
+            const cm = this.assertRaises(ArgumentParserError, () =>
+                parser.parse_args(args))
+            this.assertEqual(cm.exception.m, 'SystemExit')
+            this.assertEqual(cm.exception.stderr, `${usage_str}\n${error_str}\n`)
+        }
+    }
+
+    test_parse_args () {
         // check some non-failure cases:
         this.assertEqual(
             this.parser.parse_args('0.5 1 b -w 7'.split(' ')),
-            NS({ foo: false, bar: 0.5, w: 7, x: 'b' }),
+            NS({ foo: false, bar: 0.5, w: 7, x: 'b' })
         )
         this.assertEqual(
             this.parser.parse_args('0.25 --foo 2 -y 2 3j -- -1j'.split(' ')),
-            NS({ foo: true, bar: 0.25, y: '2', z: ['3j', '-1j'] }),
+            NS({ foo: true, bar: 0.25, y: '2', z: ['3j', '-1j'] })
         )
         this.assertEqual(
             this.parser.parse_args('--foo 0.125 1 c'.split(' ')),
-            NS({ foo: true, bar: 0.125, w: undefined, x: 'c' }),
+            NS({ foo: true, bar: 0.125, w: undefined, x: 'c' })
         )
         this.assertEqual(
             this.parser.parse_args('-1.5 3 11 -- a --foo 7 -- b'.split(' ')),
-            NS({ foo: false, bar: -1.5, t: 11, u: ['a', '--foo', '7', '--', 'b'] }),
+            NS({ foo: false, bar: -1.5, t: 11, u: ['a', '--foo', '7', '--', 'b'] })
         )
     }
 
-    test_parse_known_args() {
+    test_parse_known_args () {
         this.assertEqual(
             this.parser.parse_known_args('0.5 1 b -w 7'.split(' ')),
-            [NS({ foo: false, bar: 0.5, w: 7, x: 'b' }), []],
+            [NS({ foo: false, bar: 0.5, w: 7, x: 'b' }), []]
         )
         this.assertEqual(
             this.parser.parse_known_args('0.5 -p 1 b -w 7'.split(' ')),
-            [NS({ foo: false, bar: 0.5, w: 7, x: 'b' }), ['-p']],
+            [NS({ foo: false, bar: 0.5, w: 7, x: 'b' }), ['-p']]
         )
         this.assertEqual(
             this.parser.parse_known_args('0.5 1 b -w 7 -p'.split(' ')),
-            [NS({ foo: false, bar: 0.5, w: 7, x: 'b' }), ['-p']],
+            [NS({ foo: false, bar: 0.5, w: 7, x: 'b' }), ['-p']]
         )
         this.assertEqual(
             this.parser.parse_known_args('0.5 1 b -q -rs -w 7'.split(' ')),
-            [NS({ foo: false, bar: 0.5, w: 7, x: 'b' }), ['-q', '-rs']],
+            [NS({ foo: false, bar: 0.5, w: 7, x: 'b' }), ['-q', '-rs']]
         )
         this.assertEqual(
             this.parser.parse_known_args('0.5 -W 1 b -X Y -w 7 Z'.split(' ')),
-            [NS({ foo: false, bar: 0.5, w: 7, x: 'b' }), ['-W', '-X', 'Y', 'Z']],
+            [NS({ foo: false, bar: 0.5, w: 7, x: 'b' }), ['-W', '-X', 'Y', 'Z']]
         )
     }
 
-    test_dest() {
-        let parser = new ErrorRaisingArgumentParser()
+    test_parse_known_args_to_class_namespace () {
+        class C {}
+        this.assertEqual(
+            this.parser.parse_known_args('0.5 1 b -w 7 -p'.split(' '), C),
+            [C, ['-p']]
+        )
+        this.assertEqual(C.foo, false)
+        this.assertEqual(C.bar, 0.5)
+        this.assertEqual(C.w, 7)
+        this.assertEqual(C.x, 'b')
+    }
+
+    test_abbreviation () {
+        const parser = new ErrorRaisingArgumentParser()
+        parser.add_argument('--foodle')
+        parser.add_argument('--foonly')
+        const subparsers = parser.add_subparsers()
+        const parser1 = subparsers.add_parser('bar')
+        parser1.add_argument('--fo')
+        parser1.add_argument('--foonew')
+
+        this.assertEqual(parser.parse_args(['--food', 'baz', 'bar']),
+                         NS({ foodle: 'baz', foonly: undefined,
+                             fo: undefined, foonew: undefined }))
+        this.assertEqual(parser.parse_args(['--foon', 'baz', 'bar']),
+                         NS({ foodle: undefined, foonly: 'baz',
+                             fo: undefined, foonew: undefined }))
+        this.assertArgumentParserError(() => parser.parse_args(['--fo', 'baz', 'bar']))
+        this.assertEqual(parser.parse_args(['bar', '--fo', 'baz']),
+                         NS({ foodle: undefined, foonly: undefined,
+                             fo: 'baz', foonew: undefined }))
+        this.assertEqual(parser.parse_args(['bar', '--foo', 'baz']),
+                         NS({ foodle: undefined, foonly: undefined,
+                             fo: undefined, foonew: 'baz' }))
+        this.assertEqual(parser.parse_args(['bar', '--foon', 'baz']),
+                         NS({ foodle: undefined, foonly: undefined,
+                             fo: undefined, foonew: 'baz' }))
+        this.assertArgumentParserError(() => parser.parse_args(['bar', '--food', 'baz']))
+    }
+
+    test_parse_known_args_with_single_dash_option () {
+        const parser = new ErrorRaisingArgumentParser()
+        parser.add_argument('-k', '--known', { action: 'count', default: 0 })
+        parser.add_argument('-n', '--new', { action: 'count', default: 0 })
+        this.assertEqual(parser.parse_known_args(['-k', '-u']),
+                         [NS({ known: 1, new: 0 }), ['-u']])
+        this.assertEqual(parser.parse_known_args(['-u', '-k']),
+                         [NS({ known: 1, new: 0 }), ['-u']])
+        this.assertEqual(parser.parse_known_args(['-ku']),
+                         [NS({ known: 1, new: 0 }), ['-u']])
+        this.assertArgumentParserError(() => parser.parse_known_args(['-k=u']))
+        this.assertEqual(parser.parse_known_args(['-uk']),
+                         [NS({ known: 0, new: 0 }), ['-uk']])
+        this.assertEqual(parser.parse_known_args(['-u=k']),
+                         [NS({ known: 0, new: 0 }), ['-u=k']])
+        this.assertEqual(parser.parse_known_args(['-kunknown']),
+                         [NS({ known: 1, new: 0 }), ['-unknown']])
+        this.assertArgumentParserError(() => parser.parse_known_args(['-k=unknown']))
+        this.assertEqual(parser.parse_known_args(['-ku=nknown']),
+                         [NS({ known: 1, new: 0 }), ['-u=nknown']])
+        this.assertEqual(parser.parse_known_args(['-knew']),
+                         [NS({ known: 1, new: 1 }), ['-ew']])
+        this.assertArgumentParserError(() => parser.parse_known_args(['-kn=ew']))
+        this.assertArgumentParserError(() => parser.parse_known_args(['-k-new']))
+        this.assertArgumentParserError(() => parser.parse_known_args(['-kn-ew']))
+        this.assertEqual(parser.parse_known_args(['-kne-w']),
+                         [NS({ known: 1, new: 1 }), ['-e-w']])
+    }
+
+    test_dest () {
+        const parser = new ErrorRaisingArgumentParser()
         parser.add_argument('--foo', { action: 'store_true' })
-        let subparsers = parser.add_subparsers({ dest: 'bar' })
-        let parser1 = subparsers.add_parser('1')
+        const subparsers = parser.add_subparsers({ dest: 'bar' })
+        const parser1 = subparsers.add_parser('1')
         parser1.add_argument('baz')
         this.assertEqual(NS({ foo: false, bar: '1', baz: '2' }),
                          parser.parse_args('1 2'.split(' ')))
     }
 
-    _test_required_subparsers(parser) {
+    _test_required_subparsers (parser) {
         // Should parse the sub command
-        let ret = parser.parse_args(['run'])
+        const ret = parser.parse_args(['run'])
         this.assertEqual(ret.command, 'run')
 
         // Error when the command is missing
         this.assertArgumentParserError(() => parser.parse_args([]))
     }
 
-    test_required_subparsers_via_attribute() {
-        let parser = new ErrorRaisingArgumentParser()
-        let subparsers = parser.add_subparsers({ dest: 'command' })
+    test_required_subparsers_via_attribute () {
+        const parser = new ErrorRaisingArgumentParser()
+        const subparsers = parser.add_subparsers({ dest: 'command' })
         subparsers.required = true
         subparsers.add_parser('run')
         this._test_required_subparsers(parser)
     }
 
-    test_required_subparsers_via_kwarg() {
-        let parser = new ErrorRaisingArgumentParser()
-        let subparsers = parser.add_subparsers({ dest: 'command', required: true })
+    test_required_subparsers_via_kwarg () {
+        const parser = new ErrorRaisingArgumentParser()
+        const subparsers = parser.add_subparsers({ dest: 'command', required: true })
         subparsers.add_parser('run')
         this._test_required_subparsers(parser)
     }
 
-    test_required_subparsers_default() {
-        let parser = new ErrorRaisingArgumentParser()
-        let subparsers = parser.add_subparsers({ dest: 'command' })
+    test_required_subparsers_default () {
+        const parser = new ErrorRaisingArgumentParser()
+        const subparsers = parser.add_subparsers({ dest: 'command' })
         subparsers.add_parser('run')
         // No error here
-        let ret = parser.parse_args([])
+        const ret = parser.parse_args([])
         this.assertIsNone(ret.command)
     }
 
-    test_optional_subparsers() {
-        let parser = new ErrorRaisingArgumentParser()
-        let subparsers = parser.add_subparsers({ dest: 'command', required: false })
+    test_required_subparsers_no_destination_error () {
+        const parser = new ErrorRaisingArgumentParser()
+        const subparsers = parser.add_subparsers({ required: true })
+        subparsers.add_parser('foo')
+        subparsers.add_parser('bar')
+        const cm = this.assertRaises(ArgumentParserError, () =>
+            parser.parse_args([]))
+        this.assertRegex(
+            cm.exception.stderr,
+            /error: the following arguments are required: \{foo,bar\}\n$/)
+    }
+
+    test_optional_subparsers () {
+        const parser = new ErrorRaisingArgumentParser()
+        const subparsers = parser.add_subparsers({ dest: 'command', required: false })
         subparsers.add_parser('run')
         // No error here
-        let ret = parser.parse_args([])
+        const ret = parser.parse_args([])
         this.assertIsNone(ret.command)
     }
 
-    test_help() {
+    test_help () {
         this.assertEqual(this.parser.format_usage(),
                          'usage: PROG [-h] [--foo] bar {1,2,3} ...\n')
         this.assertEqual(this.parser.format_help(), textwrap.dedent(`\
@@ -2278,15 +2958,15 @@ class WFile {
               bar         bar help
               {1,2,3}     command help
 
-            optional arguments:
+            options:
               -h, --help  show this help message and exit
               --foo       foo help
             `))
     }
 
-    test_help_extra_prefix_chars() {
+    test_help_extra_prefix_chars () {
         // Make sure - is still used for help if it is a non-first prefix char
-        let parser = this._get_parser({ prefix_chars: '+:-' })
+        const parser = this._get_parser({ prefix_chars: '+:-' })
         this.assertEqual(parser.format_usage(),
                          'usage: PROG [-h] [++foo] bar {1,2,3} ...\n')
         this.assertEqual(parser.format_help(), textwrap.dedent(`\
@@ -2298,14 +2978,14 @@ class WFile {
               bar         bar help
               {1,2,3}     command help
 
-            optional arguments:
+            options:
               -h, --help  show this help message and exit
               ++foo       foo help
             `))
     }
 
-    test_help_non_breaking_spaces() {
-        let parser = new ErrorRaisingArgumentParser({
+    test_help_non_breaking_spaces () {
+        const parser = new ErrorRaisingArgumentParser({
             prog: 'PROG', description: 'main description' })
         parser.add_argument(
             "--non-breaking", { action: 'store_false',
@@ -2316,15 +2996,48 @@ class WFile {
 
             main description
 
-            optional arguments:
+            options:
               -h, --help      show this help message and exit
               --non-breaking  help message containing non-breaking spaces shall not
                               wrap\xA0at non-breaking spaces
         `))
     }
 
-    test_help_alternate_prefix_chars() {
-        let parser = this._get_parser({ prefix_chars: '+:/' })
+    test_help_blank () {
+        // Issue 24444
+        let parser = new ErrorRaisingArgumentParser({
+            prog: 'PROG', description: 'main description' })
+        parser.add_argument('foo', { help: '    ' })
+        this.assertEqual(parser.format_help(), textwrap.dedent(`\
+            usage: PROG [-h] foo
+
+            main description
+
+            positional arguments:
+              foo         
+
+            options:
+              -h, --help  show this help message and exit
+        `))
+
+        parser = new ErrorRaisingArgumentParser({
+            prog: 'PROG', description: 'main description' })
+        parser.add_argument('foo', { choices: [], help: '%(choices)s' })
+        this.assertEqual(parser.format_help(), textwrap.dedent(`\
+            usage: PROG [-h] {}
+
+            main description
+
+            positional arguments:
+              {}          
+
+            options:
+              -h, --help  show this help message and exit
+        `))
+    }
+
+    test_help_alternate_prefix_chars () {
+        const parser = this._get_parser({ prefix_chars: '+:/' })
         this.assertEqual(parser.format_usage(),
                          'usage: PROG [+h] [++foo] bar {1,2,3} ...\n')
         this.assertEqual(parser.format_help(), textwrap.dedent(`\
@@ -2336,13 +3049,13 @@ class WFile {
               bar         bar help
               {1,2,3}     command help
 
-            optional arguments:
+            options:
               +h, ++help  show this help message and exit
               ++foo       foo help
             `))
     }
 
-    test_parser_command_help() {
+    test_parser_command_help () {
         this.assertEqual(this.command_help_parser.format_usage(),
                          'usage: PROG [-h] [--foo] bar {1,2,3} ...\n')
         this.assertEqual(this.command_help_parser.format_help(),
@@ -2358,18 +3071,45 @@ class WFile {
                 2         2 help
                 3         3 help
 
-            optional arguments:
+            options:
               -h, --help  show this help message and exit
               --foo       foo help
             `))
     }
 
-    test_subparser_title_help() {
-        let parser = new ErrorRaisingArgumentParser({ prog: 'PROG',
+    assert_bad_help (context_type, func, ...args) {
+        const cm = this.assertRaises(TypeError, () => func(...args))
+        this.assertRegex(cm.exception.message, /badly formed help string/)
+        assert(cm.exception.cause instanceof context_type)
+    }
+
+    test_invalid_subparsers_help () {
+        let parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+        this.assert_bad_help(TypeError, parser.add_subparsers.bind(parser),
+            { help: '%Y-%m-%d' })
+        parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+        this.assert_bad_help(TypeError, parser.add_subparsers.bind(parser),
+            { help: '%(spam)s' })
+        parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+        this.assert_bad_help(TypeError, parser.add_subparsers.bind(parser),
+            { help: '%(prog)d' })
+    }
+
+    test_invalid_subparser_help () {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+        const subparsers = parser.add_subparsers()
+        const add_parser = subparsers.add_parser.bind(subparsers)
+        this.assert_bad_help(TypeError, add_parser, '1', { help: '%Y-%m-%d' })
+        this.assert_bad_help(TypeError, add_parser, '1', { help: '%(spam)s' })
+        this.assert_bad_help(TypeError, add_parser, '1', { help: '%(prog)d' })
+    }
+
+    test_subparser_title_help () {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG',
                                                       description: 'main description' })
         parser.add_argument('--foo', { action: 'store_true', help: 'foo help' })
         parser.add_argument('bar', { help: 'bar help' })
-        let subparsers = parser.add_subparsers({ title: 'subcommands',
+        const subparsers = parser.add_subparsers({ title: 'subcommands',
                                                  description: 'command help',
                                                  help: 'additional text' })
         subparsers.add_parser('1')
@@ -2384,7 +3124,7 @@ class WFile {
             positional arguments:
               bar         bar help
 
-            optional arguments:
+            options:
               -h, --help  show this help message and exit
               --foo       foo help
 
@@ -2395,13 +3135,13 @@ class WFile {
             `))
     }
 
-    _test_subparser_help(args_str, expected_help) {
-        let cm = this.assertRaises(ArgumentParserError, () =>
+    _test_subparser_help (args_str, expected_help) {
+        const cm = this.assertRaises(ArgumentParserError, () =>
             this.parser.parse_args(args_str.split(/\s+/).filter(Boolean)))
         this.assertEqual(expected_help, cm.exception.stdout)
     }
 
-    test_subparser1_help() {
+    test_subparser1_help () {
         this._test_subparser_help('5.0 1 -h', textwrap.dedent(`\
             usage: PROG bar 1 [-h] [-w W] {a,b,c}
 
@@ -2410,13 +3150,13 @@ class WFile {
             positional arguments:
               {a,b,c}     x help
 
-            optional arguments:
+            options:
               -h, --help  show this help message and exit
               -w W        w help
             `))
     }
 
-    test_subparser2_help() {
+    test_subparser2_help () {
         this._test_subparser_help('5.0 2 -h', textwrap.dedent(`\
             usage: PROG bar 2 [-h] [-y {1,2,3}] [z ...]
 
@@ -2425,32 +3165,32 @@ class WFile {
             positional arguments:
               z           z help
 
-            optional arguments:
+            options:
               -h, --help  show this help message and exit
               -y {1,2,3}  y help
             `))
     }
 
-    test_alias_invocation() {
-        let parser = this._get_parser({ aliases: true })
+    test_alias_invocation () {
+        const parser = this._get_parser({ aliases: true })
         this.assertEqual(
             parser.parse_known_args('0.5 1alias1 b'.split(' ')),
-            [NS({ foo: false, bar: 0.5, w: undefined, x: 'b' }), []],
+            [NS({ foo: false, bar: 0.5, w: undefined, x: 'b' }), []]
         )
         this.assertEqual(
             parser.parse_known_args('0.5 1alias2 b'.split(' ')),
-            [NS({ foo: false, bar: 0.5, w: undefined, x: 'b' }), []],
+            [NS({ foo: false, bar: 0.5, w: undefined, x: 'b' }), []]
         )
     }
 
-    test_error_alias_invocation() {
-        let parser = this._get_parser({ aliases: true })
+    test_error_alias_invocation () {
+        const parser = this._get_parser({ aliases: true })
         this.assertArgumentParserError(() => parser.parse_args(
                                        '0.5 1alias3 b'.split(' ')))
     }
 
-    test_alias_help() {
-        let parser = this._get_parser({ aliases: true, subparser_help: true })
+    test_alias_help () {
+        const parser = this._get_parser({ aliases: true, subparser_help: true })
         this.maxDiff = undefined
         this.assertEqual(parser.format_help(), textwrap.dedent(`\
             usage: PROG [-h] [--foo] bar COMMAND ...
@@ -2460,7 +3200,7 @@ class WFile {
             positional arguments:
               bar                   bar help
 
-            optional arguments:
+            options:
               -h, --help            show this help message and exit
               --foo                 foo help
 
@@ -2481,41 +3221,79 @@ class WFile {
 ;(new class TestPositionalsGroups extends TestCase {
     /* Tests that order of group positionals matches construction order */
 
-    test_nongroup_first() {
-        let parser = new ErrorRaisingArgumentParser()
+    test_nongroup_first () {
+        const parser = new ErrorRaisingArgumentParser()
         parser.add_argument('foo')
-        let group = parser.add_argument_group('g')
+        const group = parser.add_argument_group('g')
         group.add_argument('bar')
         parser.add_argument('baz')
-        let expected = NS({ foo: '1', bar: '2', baz: '3' })
-        let result = parser.parse_args('1 2 3'.split(' '))
+        const expected = NS({ foo: '1', bar: '2', baz: '3' })
+        const result = parser.parse_args('1 2 3'.split(' '))
         this.assertEqual(expected, result)
     }
 
-    test_group_first() {
-        let parser = new ErrorRaisingArgumentParser()
-        let group = parser.add_argument_group('xxx')
+    test_group_first () {
+        const parser = new ErrorRaisingArgumentParser()
+        const group = parser.add_argument_group('xxx')
         group.add_argument('foo')
         parser.add_argument('bar')
         parser.add_argument('baz')
-        let expected = NS({ foo: '1', bar: '2', baz: '3' })
-        let result = parser.parse_args('1 2 3'.split(' '))
+        const expected = NS({ foo: '1', bar: '2', baz: '3' })
+        const result = parser.parse_args('1 2 3'.split(' '))
         this.assertEqual(expected, result)
     }
 
-    test_interleaved_groups() {
-        let parser = new ErrorRaisingArgumentParser()
+    test_interleaved_groups () {
+        const parser = new ErrorRaisingArgumentParser()
         let group = parser.add_argument_group('xxx')
         parser.add_argument('foo')
         group.add_argument('bar')
         parser.add_argument('baz')
         group = parser.add_argument_group('yyy')
         group.add_argument('frell')
-        let expected = NS({ foo: '1', bar: '2', baz: '3', frell: '4' })
-        let result = parser.parse_args('1 2 3 4'.split(' '))
+        const expected = NS({ foo: '1', bar: '2', baz: '3', frell: '4' })
+        const result = parser.parse_args('1 2 3 4'.split(' '))
         this.assertEqual(expected, result)
     }
 }).run()
+
+
+;(new class TestGroupConstructor extends TestCase {
+
+    assertGroupPrefixCharsWarning (prefix_chars) {
+        const parser = new ErrorRaisingArgumentParser()
+        const msg =
+            "The use of the undocumented 'prefix_chars' parameter in " +
+            'ArgumentParser.add_argument_group() is deprecated.'
+        const warnings = []
+        const emitWarning = process.emitWarning
+        process.emitWarning = (warning, type) => warnings.push([warning, type])
+        try {
+            parser.add_argument_group({ prefix_chars })
+        } finally {
+            process.emitWarning = emitWarning
+        }
+        this.assertEqual([[msg, 'DeprecationWarning']], warnings)
+    }
+
+    test_group_prefix_chars () {
+        this.assertGroupPrefixCharsWarning('-+')
+    }
+
+    test_group_prefix_chars_default () {
+        // "default" isn't quite the right word here, but it's the same as
+        // the parser's default prefix so it's a good test
+        this.assertGroupPrefixCharsWarning('-')
+    }
+
+    test_nested_argument_group () {
+        const parser = argparse.ArgumentParser()
+        const group = parser.add_argument_group()
+        const cm = this.assertRaises(TypeError, () => group.add_argument_group())
+        this.assertRegex(String(cm.exception), /argument groups cannot be nested/)
+    }
+}).run()
+
 
 // ===================
 // Parent parser tests
@@ -2524,22 +3302,24 @@ class WFile {
 ;(new class TestParentParsers extends TestCase {
     /* Tests that parsers can be created with parent parsers */
 
-    assertArgumentParserError(...args) {
+    force_color = false
+
+    assertArgumentParserError (...args) {
         this.assertRaises(ArgumentParserError, ...args)
     }
 
-    setUp() {
+    setUp () {
         super.setUp()
         this.wxyz_parent = new ErrorRaisingArgumentParser({ add_help: false })
         this.wxyz_parent.add_argument('--w')
-        let x_group = this.wxyz_parent.add_argument_group('x')
+        const x_group = this.wxyz_parent.add_argument_group('x')
         x_group.add_argument('-y')
         this.wxyz_parent.add_argument('z')
 
         this.abcd_parent = new ErrorRaisingArgumentParser({ add_help: false })
         this.abcd_parent.add_argument('a')
         this.abcd_parent.add_argument('-b')
-        let c_group = this.abcd_parent.add_argument_group('c')
+        const c_group = this.abcd_parent.add_argument_group('c')
         c_group.add_argument('--d')
 
         this.w_parent = new ErrorRaisingArgumentParser({ add_help: false })
@@ -2550,33 +3330,33 @@ class WFile {
 
         // parents with mutually exclusive groups
         this.ab_mutex_parent = new ErrorRaisingArgumentParser({ add_help: false })
-        let group = this.ab_mutex_parent.add_mutually_exclusive_group()
+        const group = this.ab_mutex_parent.add_mutually_exclusive_group()
         group.add_argument('-a', { action: 'store_true' })
         group.add_argument('-b', { action: 'store_true' })
 
         this.main_program = path.basename(process.argv[1])
     }
 
-    test_single_parent() {
-        let parser = new ErrorRaisingArgumentParser({ parents: [this.wxyz_parent] })
+    test_single_parent () {
+        const parser = new ErrorRaisingArgumentParser({ parents: [this.wxyz_parent] })
         this.assertEqual(parser.parse_args('-y 1 2 --w 3'.split(' ')),
                          NS({ w: '3', y: '1', z: '2' }))
     }
 
-    test_single_parent_mutex() {
+    test_single_parent_mutex () {
         this._test_mutex_ab(args => this.ab_mutex_parent.parse_args(args))
-        let parser = new ErrorRaisingArgumentParser({ parents: [this.ab_mutex_parent] })
+        const parser = new ErrorRaisingArgumentParser({ parents: [this.ab_mutex_parent] })
         this._test_mutex_ab(args => parser.parse_args(args))
     }
 
-    test_single_granparent_mutex() {
-        let parents = [this.ab_mutex_parent]
+    test_single_grandparent_mutex () {
+        const parents = [this.ab_mutex_parent]
         let parser = new ErrorRaisingArgumentParser({ add_help: false, parents })
         parser = new ErrorRaisingArgumentParser({ parents: [parser] })
         this._test_mutex_ab(args => parser.parse_args(args))
     }
 
-    _test_mutex_ab(parse_args) {
+    _test_mutex_ab (parse_args) {
         this.assertEqual(parse_args([]), NS({ a: false, b: false }))
         this.assertEqual(parse_args(['-a']), NS({ a: true, b: false }))
         this.assertEqual(parse_args(['-b']), NS({ a: false, b: true }))
@@ -2587,16 +3367,16 @@ class WFile {
         this.assertArgumentParserError(() => parse_args(['-b', '-c']))
     }
 
-    test_multiple_parents() {
-        let parents = [this.abcd_parent, this.wxyz_parent]
-        let parser = new ErrorRaisingArgumentParser({ parents })
+    test_multiple_parents () {
+        const parents = [this.abcd_parent, this.wxyz_parent]
+        const parser = new ErrorRaisingArgumentParser({ parents })
         this.assertEqual(parser.parse_args('--d 1 --w 2 3 4'.split(' ')),
                          NS({ a: '3', b: undefined, d: '1', w: '2', y: undefined, z: '4' }))
     }
 
-    test_multiple_parents_mutex() {
-        let parents = [this.ab_mutex_parent, this.wxyz_parent]
-        let parser = new ErrorRaisingArgumentParser({ parents })
+    test_multiple_parents_mutex () {
+        const parents = [this.ab_mutex_parent, this.wxyz_parent]
+        const parser = new ErrorRaisingArgumentParser({ parents })
         this.assertEqual(parser.parse_args('-a --w 2 3'.split(' ')),
                          NS({ a: true, b: false, w: '2', y: undefined, z: '3' }))
         this.assertArgumentParserError(() =>
@@ -2605,43 +3385,43 @@ class WFile {
             parser.parse_args('-a -b --w 2 3'.split(' ')))
     }
 
-    test_conflicting_parents() {
+    test_conflicting_parents () {
         this.assertRaises(
             argparse.ArgumentError,
             () => argparse.ArgumentParser({ parents: [this.w_parent, this.wxyz_parent] }))
     }
 
-    test_conflicting_parents_mutex() {
+    test_conflicting_parents_mutex () {
         this.assertRaises(
             argparse.ArgumentError,
             () => argparse.ArgumentParser({ parents: [this.abcd_parent, this.ab_mutex_parent] }))
     }
 
-    test_same_argument_name_parents() {
-        let parents = [this.wxyz_parent, this.z_parent]
-        let parser = new ErrorRaisingArgumentParser({ parents })
+    test_same_argument_name_parents () {
+        const parents = [this.wxyz_parent, this.z_parent]
+        const parser = new ErrorRaisingArgumentParser({ parents })
         this.assertEqual(parser.parse_args('1 2'.split(' ')),
                          NS({ w: undefined, y: undefined, z: '2' }))
     }
 
-    test_subparser_parents() {
-        let parser = new ErrorRaisingArgumentParser()
-        let subparsers = parser.add_subparsers()
-        let abcde_parser = subparsers.add_parser('bar', { parents: [this.abcd_parent] })
+    test_subparser_parents () {
+        const parser = new ErrorRaisingArgumentParser()
+        const subparsers = parser.add_subparsers()
+        const abcde_parser = subparsers.add_parser('bar', { parents: [this.abcd_parent] })
         abcde_parser.add_argument('e')
         this.assertEqual(parser.parse_args('bar -b 1 --d 2 3 4'.split(' ')),
                          NS({ a: '3', b: '1', d: '2', e: '4' }))
     }
 
-    test_subparser_parents_mutex() {
-        let parser = new ErrorRaisingArgumentParser()
-        let subparsers = parser.add_subparsers()
+    test_subparser_parents_mutex () {
+        const parser = new ErrorRaisingArgumentParser()
+        const subparsers = parser.add_subparsers()
         let parents = [this.ab_mutex_parent]
-        let abc_parser = subparsers.add_parser('foo', { parents })
-        let c_group = abc_parser.add_argument_group('c_group')
+        const abc_parser = subparsers.add_parser('foo', { parents })
+        const c_group = abc_parser.add_argument_group('c_group')
         c_group.add_argument('c')
         parents = [this.wxyz_parent, this.ab_mutex_parent]
-        let wxyzabe_parser = subparsers.add_parser('bar', { parents })
+        const wxyzabe_parser = subparsers.add_parser('bar', { parents })
         wxyzabe_parser.add_argument('e')
         this.assertEqual(parser.parse_args('foo -a 4'.split(' ')),
                          NS({ a: true, b: false, c: '4' }))
@@ -2653,19 +3433,18 @@ class WFile {
             () => parser.parse_args('bar -b -a 4'.split(' ')))
     }
 
-    test_parent_help() {
-        let parents = [this.abcd_parent, this.wxyz_parent]
-        let parser = new ErrorRaisingArgumentParser({ parents })
-        let parser_help = parser.format_help()
-        let progname = this.main_program
+    test_parent_help () {
+        const parents = [this.abcd_parent, this.wxyz_parent]
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG', parents })
+        const parser_help = parser.format_help()
         this.assertEqual(parser_help, textwrap.dedent(sub(`\
-            usage: %s%s[-h] [-b B] [--d D] [--w W] [-y Y] a z
+            usage: PROG [-h] [-b B] [--d D] [--w W] [-y Y] a z
 
             positional arguments:
               a
               z
 
-            optional arguments:
+            options:
               -h, --help  show this help message and exit
               -b B
               --w W
@@ -2675,28 +3454,27 @@ class WFile {
 
             x:
               -y Y
-        `, progname, progname ? ' ' : '')))
+        `)))
     }
 
-    test_groups_parents() {
-        let parent = new ErrorRaisingArgumentParser({ add_help: false })
-        let g = parent.add_argument_group({ title: 'g', description: 'gd' })
+    test_groups_parents () {
+        const parent = new ErrorRaisingArgumentParser({ add_help: false })
+        const g = parent.add_argument_group({ title: 'g', description: 'gd' })
         g.add_argument('-w')
         g.add_argument('-x')
-        let m = parent.add_mutually_exclusive_group()
+        const m = parent.add_mutually_exclusive_group()
         m.add_argument('-y')
         m.add_argument('-z')
-        let parser = new ErrorRaisingArgumentParser({ parents: [parent] })
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG', parents: [parent] })
 
         this.assertRaises(ArgumentParserError, () =>
             parser.parse_args(['-y', 'Y', '-z', 'Z']))
 
-        let parser_help = parser.format_help()
-        let progname = this.main_program
+        const parser_help = parser.format_help()
         this.assertEqual(parser_help, textwrap.dedent(sub(`\
-            usage: %s%s[-h] [-w W] [-x X] [-y Y | -z Z]
+            usage: PROG [-h] [-w W] [-x X] [-y Y | -z Z]
 
-            optional arguments:
+            options:
               -h, --help  show this help message and exit
               -y Y
               -z Z
@@ -2706,7 +3484,41 @@ class WFile {
 
               -w W
               -x X
-        `, progname, progname ? ' ' : '')))
+        `)))
+    }
+
+    test_wrong_type_parents () {
+        this.assertRaises(TypeError, () => new ErrorRaisingArgumentParser({ parents: [1] }))
+    }
+
+    test_mutex_groups_parents () {
+        const parent = new ErrorRaisingArgumentParser({ add_help: false })
+        const g = parent.add_argument_group({ title: 'g', description: 'gd' })
+        g.add_argument('-w')
+        g.add_argument('-x')
+        const m = g.add_mutually_exclusive_group()
+        m.add_argument('-y')
+        m.add_argument('-z')
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG', parents: [parent] })
+
+        this.assertRaises(ArgumentParserError, () =>
+            parser.parse_args(['-y', 'Y', '-z', 'Z']))
+
+        const parser_help = parser.format_help()
+        this.assertEqual(parser_help, textwrap.dedent(`\
+            usage: PROG [-h] [-w W] [-x X] [-y Y | -z Z]
+
+            options:
+              -h, --help  show this help message and exit
+
+            g:
+              gd
+
+              -w W
+              -x X
+              -y Y
+              -z Z
+        `))
     }
 }).run()
 
@@ -2715,17 +3527,18 @@ class WFile {
 // ==============================
 
 class TestMutuallyExclusiveGroupErrors extends TestCase {
+    force_color = false
 
-    test_invalid_add_argument_group() {
-        let parser = new ErrorRaisingArgumentParser()
-        let raises = this.assertRaises
+    test_invalid_add_argument_group () {
+        const parser = new ErrorRaisingArgumentParser()
+        const raises = this.assertRaises
         raises(TypeError, () => parser.add_mutually_exclusive_group({ title: 'foo' }))
     }
 
-    test_invalid_add_argument() {
-        let parser = new ErrorRaisingArgumentParser()
-        let group = parser.add_mutually_exclusive_group()
-        let raises = this.assertRaises
+    test_invalid_add_argument () {
+        const parser = new ErrorRaisingArgumentParser()
+        const group = parser.add_mutually_exclusive_group()
+        const raises = this.assertRaises
         raises(TypeError, () => group.add_argument('--foo', { required: true }))
         raises(TypeError, () => group.add_argument('bar'))
         raises(TypeError, () => group.add_argument('bar', { nargs: '+' }))
@@ -2733,18 +3546,18 @@ class TestMutuallyExclusiveGroupErrors extends TestCase {
         raises(TypeError, () => group.add_argument('bar', { nargs: argparse.PARSER }))
     }
 
-    test_help() {
-        let parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
-        let group1 = parser.add_mutually_exclusive_group()
+    test_help () {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+        const group1 = parser.add_mutually_exclusive_group()
         group1.add_argument('--foo', { action: 'store_true' })
         group1.add_argument('--bar', { action: 'store_false' })
-        let group2 = parser.add_mutually_exclusive_group()
+        const group2 = parser.add_mutually_exclusive_group()
         group2.add_argument('--soup', { action: 'store_true' })
         group2.add_argument('--nuts', { action: 'store_false' })
-        let expected = `\
+        const expected = `\
             usage: PROG [-h] [--foo | --bar] [--soup | --nuts]
 
-            optional arguments:
+            options:
               -h, --help  show this help message and exit
               --foo
               --bar
@@ -2753,80 +3566,153 @@ class TestMutuallyExclusiveGroupErrors extends TestCase {
               `
         this.assertEqual(parser.format_help(), textwrap.dedent(expected))
     }
+
+    test_optional_order () {
+        let parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+        let group = parser.add_mutually_exclusive_group({ required: true })
+        group.add_argument('--foo')
+        group.add_argument('bar', { nargs: '?' })
+        const expected = `\
+            usage: PROG [-h] (--foo FOO | bar)
+
+            positional arguments:
+              bar
+
+            options:
+              -h, --help  show this help message and exit
+              --foo FOO
+              `
+        this.assertEqual(parser.format_help(), textwrap.dedent(expected))
+
+        parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+        group = parser.add_mutually_exclusive_group({ required: true })
+        group.add_argument('bar', { nargs: '?' })
+        group.add_argument('--foo')
+        this.assertEqual(parser.format_help(), textwrap.dedent(expected))
+    }
+
+    test_help_subparser_all_mutually_exclusive_group_members_suppressed () {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+        const commands = parser.add_subparsers({ title: 'commands', dest: 'command' })
+        const cmd_foo = commands.add_parser('foo')
+        const group = cmd_foo.add_mutually_exclusive_group()
+        group.add_argument('--verbose', {
+            action: 'store_true', help: argparse.SUPPRESS
+        })
+        group.add_argument('--quiet', {
+            action: 'store_true', help: argparse.SUPPRESS
+        })
+        const longopt = '--' + 'long'.repeat(32)
+        const longmeta = 'LONG'.repeat(32)
+        cmd_foo.add_argument(longopt)
+        const expected = `\
+            usage: PROG foo [-h]
+                            [${longopt} ${longmeta}]
+
+            options:
+              -h, --help            show this help message and exit
+              ${longopt} ${longmeta}
+              `
+        this.assertEqual(cmd_foo.format_help(), textwrap.dedent(expected))
+    }
+
+    test_usage_empty_group () {
+        // See issue 26952
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+        parser.add_mutually_exclusive_group()
+        this.assertEqual(parser.format_usage(), 'usage: PROG [-h]\n')
+    }
+
+    test_nested_mutex_groups () {
+        const parser = argparse.ArgumentParser({ prog: 'PROG' })
+        const group = parser.add_mutually_exclusive_group()
+        group.add_argument('--spam')
+        const cm = this.assertRaises(TypeError, () =>
+            group.add_mutually_exclusive_group())
+        this.assertRegex(String(cm.exception),
+            /mutually exclusive groups cannot be nested/)
+    }
 }
 
-function MEMixin(cls) {
+function MEMixin (cls) {
     return class MEMixin extends cls {
 
-        test_failures_when_not_required() {
-            let parser = this.get_parser({ required: false })
-            let error = ArgumentParserError
-            for (let args_string of this.failures) {
+        force_not_colorized = new Set([
+            'test_usage_when_not_required',
+            'test_usage_when_required',
+            'test_help_when_not_required',
+            'test_help_when_required'
+        ])
+
+        test_failures_when_not_required () {
+            const parser = this.get_parser({ required: false })
+            const error = ArgumentParserError
+            for (const args_string of this.failures) {
                 this.assertRaises(error, () =>
                     parser.parse_args(args_string.split(/\s+/).filter(Boolean)))
             }
         }
 
-        test_failures_when_required() {
-            let parser = this.get_parser({ required: true })
-            let error = ArgumentParserError
-            for (let args_string of this.failures.concat([''])) {
+        test_failures_when_required () {
+            const parser = this.get_parser({ required: true })
+            const error = ArgumentParserError
+            for (const args_string of this.failures.concat([''])) {
                 this.assertRaises(error, () =>
                     parser.parse_args(args_string.split(/\s+/).filter(Boolean)))
             }
         }
 
-        test_successes_when_not_required() {
-            let parser = this.get_parser({ required: false })
-            let successes = this.successes.concat(this.successes_when_not_required)
-            for (let [ args_string, expected_ns ] of successes) {
-                let actual_ns = parser.parse_args(args_string.split(/\s+/).filter(Boolean))
+        test_successes_when_not_required () {
+            const parser = this.get_parser({ required: false })
+            const successes = this.successes.concat(this.successes_when_not_required)
+            for (const [args_string, expected_ns] of successes) {
+                const actual_ns = parser.parse_args(args_string.split(/\s+/).filter(Boolean))
                 this.assertEqual(actual_ns, expected_ns)
             }
         }
 
-        test_successes_when_required() {
-            let parser = this.get_parser({ required: true })
-            for (let [ args_string, expected_ns ] of this.successes) {
-                let actual_ns = parser.parse_args(args_string.split(/\s+/).filter(Boolean))
+        test_successes_when_required () {
+            const parser = this.get_parser({ required: true })
+            for (const [args_string, expected_ns] of this.successes) {
+                const actual_ns = parser.parse_args(args_string.split(/\s+/).filter(Boolean))
                 this.assertEqual(actual_ns, expected_ns)
             }
         }
 
-        test_usage_when_not_required() {
-            let parser = this.get_parser({ required: false })
-            let expected_usage = this.usage_when_not_required
+        test_usage_when_not_required () {
+            const parser = this.get_parser({ required: false })
+            const expected_usage = this.usage_when_not_required
             this.assertEqual(parser.format_usage(), textwrap.dedent(expected_usage))
         }
 
-        test_usage_when_required() {
-            let parser = this.get_parser({ required: true })
-            let expected_usage = this.usage_when_required
+        test_usage_when_required () {
+            const parser = this.get_parser({ required: true })
+            const expected_usage = this.usage_when_required
             this.assertEqual(parser.format_usage(), textwrap.dedent(expected_usage))
         }
 
-        test_help_when_not_required() {
-            let parser = this.get_parser({ required: false })
-            let help = this.usage_when_not_required + this.help
+        test_help_when_not_required () {
+            const parser = this.get_parser({ required: false })
+            const help = this.usage_when_not_required + this.help
             this.assertEqual(parser.format_help(), textwrap.dedent(help))
         }
 
-        test_help_when_required() {
-            let parser = this.get_parser({ required: true })
-            let help = this.usage_when_required + this.help
+        test_help_when_required () {
+            const parser = this.get_parser({ required: true })
+            const help = this.usage_when_required + this.help
             this.assertEqual(parser.format_help(), textwrap.dedent(help))
         }
     }
 }
 
 
-let MEMixin_TestCase = MEMixin(TestCase)
+const MEMixin_TestCase = MEMixin(TestCase)
 
 class TestMutuallyExclusiveSimple extends MEMixin_TestCase {
 
-    get_parser({ required = undefined } = {}) {
-        let parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
-        let group = parser.add_mutually_exclusive_group({ required })
+    get_parser ({ required = undefined } = {}) {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+        const group = parser.add_mutually_exclusive_group({ required })
         group.add_argument('--bar', { help: 'bar help' })
         group.add_argument('--baz', { nargs: '?', const: 'Z', help: 'baz help' })
         return parser
@@ -2851,7 +3737,7 @@ class TestMutuallyExclusiveSimple extends MEMixin_TestCase {
         `
     help = `\
 
-        optional arguments:
+        options:
           -h, --help   show this help message and exit
           --bar BAR    bar help
           --baz [BAZ]  baz help
@@ -2861,11 +3747,11 @@ class TestMutuallyExclusiveSimple extends MEMixin_TestCase {
 
 class TestMutuallyExclusiveLong extends MEMixin_TestCase {
 
-    get_parser({ required = undefined } = {}) {
-        let parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+    get_parser ({ required = undefined } = {}) {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
         parser.add_argument('--abcde', { help: 'abcde help' })
         parser.add_argument('--fghij', { help: 'fghij help' })
-        let group = parser.add_mutually_exclusive_group({ required })
+        const group = parser.add_mutually_exclusive_group({ required })
         group.add_argument('--klmno', { help: 'klmno help' })
         group.add_argument('--pqrst', { help: 'pqrst help' })
         return parser
@@ -2885,16 +3771,16 @@ class TestMutuallyExclusiveLong extends MEMixin_TestCase {
     ]
 
     usage_when_not_required = `\
-    usage: PROG [-h] [--abcde ABCDE] [--fghij FGHIJ]
-                [--klmno KLMNO | --pqrst PQRST]
+    usage: PROG [-h] [--abcde ABCDE] [--fghij FGHIJ] [--klmno KLMNO |
+                --pqrst PQRST]
     `
     usage_when_required = `\
-    usage: PROG [-h] [--abcde ABCDE] [--fghij FGHIJ]
-                (--klmno KLMNO | --pqrst PQRST)
+    usage: PROG [-h] [--abcde ABCDE] [--fghij FGHIJ] (--klmno KLMNO |
+                --pqrst PQRST)
     `
     help = `\
 
-    optional arguments:
+    options:
       -h, --help     show this help message and exit
       --abcde ABCDE  abcde help
       --fghij FGHIJ  fghij help
@@ -2906,9 +3792,9 @@ class TestMutuallyExclusiveLong extends MEMixin_TestCase {
 
 class TestMutuallyExclusiveFirstSuppressed extends MEMixin_TestCase {
 
-    get_parser({ required = undefined } = {}) {
-        let parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
-        let group = parser.add_mutually_exclusive_group({ required })
+    get_parser ({ required = undefined } = {}) {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+        const group = parser.add_mutually_exclusive_group({ required })
         group.add_argument('-x', { help: argparse.SUPPRESS })
         group.add_argument('-y', { action: 'store_false', help: 'y help' })
         return parser
@@ -2932,7 +3818,7 @@ class TestMutuallyExclusiveFirstSuppressed extends MEMixin_TestCase {
         `
     help = `\
 
-        optional arguments:
+        options:
           -h, --help  show this help message and exit
           -y          y help
         `
@@ -2941,9 +3827,9 @@ class TestMutuallyExclusiveFirstSuppressed extends MEMixin_TestCase {
 
 class TestMutuallyExclusiveManySuppressed extends MEMixin_TestCase {
 
-    get_parser({ required = undefined } = {}) {
-        let parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
-        let group = parser.add_mutually_exclusive_group({ required })
+    get_parser ({ required = undefined } = {}) {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+        const group = parser.add_mutually_exclusive_group({ required })
         group.add_argument('--spam', { action: 'store_true', help: argparse.SUPPRESS })
         group.add_argument('--badger', { action: 'store_false', help: argparse.SUPPRESS })
         group.add_argument('--bladder', { help: argparse.SUPPRESS })
@@ -2971,7 +3857,7 @@ class TestMutuallyExclusiveManySuppressed extends MEMixin_TestCase {
     usage_when_not_required = this.usage_when_required
     help = `\
 
-        optional arguments:
+        options:
           -h, --help  show this help message and exit
         `
 }
@@ -2979,12 +3865,12 @@ class TestMutuallyExclusiveManySuppressed extends MEMixin_TestCase {
 
 class TestMutuallyExclusiveOptionalAndPositional extends MEMixin_TestCase {
 
-    get_parser({ required = undefined } = {}) {
-        let parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
-        let group = parser.add_mutually_exclusive_group({ required })
+    get_parser ({ required = undefined } = {}) {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+        const group = parser.add_mutually_exclusive_group({ required })
         group.add_argument('--foo', { action: 'store_true', help: 'FOO' })
         group.add_argument('--spam', { help: 'SPAM' })
-        group.add_argument('badger', { nargs: '*', default: 'X', help: 'BADGER' })
+        group.add_argument('badger', { nargs: '*', help: 'BADGER' })
         return parser
     }
 
@@ -2996,13 +3882,13 @@ class TestMutuallyExclusiveOptionalAndPositional extends MEMixin_TestCase {
         '--foo X Y',
     ]
     successes = [
-        ['--foo', NS({ foo: true, spam: undefined, badger: 'X' })],
-        ['--spam S', NS({ foo: false, spam: 'S', badger: 'X' })],
+        ['--foo', NS({ foo: true, spam: undefined, badger: [] })],
+        ['--spam S', NS({ foo: false, spam: 'S', badger: [] })],
         ['X', NS({ foo: false, spam: undefined, badger: ['X'] })],
         ['X Y Z', NS({ foo: false, spam: undefined, badger: ['X', 'Y', 'Z'] })],
     ]
     successes_when_not_required = [
-        ['', NS({ foo: false, spam: undefined, badger: 'X' })],
+        ['', NS({ foo: false, spam: undefined, badger: [] })],
     ]
 
     usage_when_not_required = `\
@@ -3016,7 +3902,7 @@ class TestMutuallyExclusiveOptionalAndPositional extends MEMixin_TestCase {
         positional arguments:
           badger       BADGER
 
-        optional arguments:
+        options:
           -h, --help   show this help message and exit
           --foo        FOO
           --spam SPAM  SPAM
@@ -3026,56 +3912,60 @@ class TestMutuallyExclusiveOptionalAndPositional extends MEMixin_TestCase {
 
 class TestMutuallyExclusiveOptionalsMixed extends MEMixin_TestCase {
 
-    get_parser({ required = undefined } = {}) {
-        let parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+    get_parser ({ required = undefined } = {}) {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
         parser.add_argument('-x', { action: 'store_true', help: 'x help' })
-        let group = parser.add_mutually_exclusive_group({ required })
+        const group = parser.add_mutually_exclusive_group({ required })
         group.add_argument('-a', { action: 'store_true', help: 'a help' })
         group.add_argument('-b', { action: 'store_true', help: 'b help' })
         parser.add_argument('-y', { action: 'store_true', help: 'y help' })
         group.add_argument('-c', { action: 'store_true', help: 'c help' })
+        parser.add_argument('-z', { action: 'store_true', help: 'z help' })
         return parser
     }
 
     failures = ['-a -b', '-b -c', '-a -c', '-a -b -c']
     successes = [
-        ['-a', NS({ a: true, b: false, c: false, x: false, y: false })],
-        ['-b', NS({ a: false, b: true, c: false, x: false, y: false })],
-        ['-c', NS({ a: false, b: false, c: true, x: false, y: false })],
-        ['-a -x', NS({ a: true, b: false, c: false, x: true, y: false })],
-        ['-y -b', NS({ a: false, b: true, c: false, x: false, y: true })],
-        ['-x -y -c', NS({ a: false, b: false, c: true, x: true, y: true })],
+        ['-a', NS({ a: true, b: false, c: false, x: false, y: false, z: false })],
+        ['-b', NS({ a: false, b: true, c: false, x: false, y: false, z: false })],
+        ['-c', NS({ a: false, b: false, c: true, x: false, y: false, z: false })],
+        ['-a -x', NS({ a: true, b: false, c: false, x: true, y: false, z: false })],
+        ['-y -b', NS({ a: false, b: true, c: false, x: false, y: true, z: false })],
+        ['-x -y -c', NS({ a: false, b: false, c: true, x: true, y: true, z: false })],
     ]
     successes_when_not_required = [
-        ['', NS({ a: false, b: false, c: false, x: false, y: false })],
-        ['-x', NS({ a: false, b: false, c: false, x: true, y: false })],
-        ['-y', NS({ a: false, b: false, c: false, x: false, y: true })],
+        ['', NS({ a: false, b: false, c: false, x: false, y: false, z: false })],
+        ['-x', NS({ a: false, b: false, c: false, x: true, y: false, z: false })],
+        ['-y', NS({ a: false, b: false, c: false, x: false, y: true, z: false })],
     ]
 
-    usage_when_required = `\
-        usage: PROG [-h] [-x] [-a] [-b] [-y] [-c]
+    usage_when_not_required = `\
+        usage: PROG [-h] [-x] [-a | -b | -c] [-y] [-z]
         `
-    usage_when_not_required = this.usage_when_required
+    usage_when_required = `\
+        usage: PROG [-h] [-x] (-a | -b | -c) [-y] [-z]
+        `
     help = `\
 
-        optional arguments:
+        options:
           -h, --help  show this help message and exit
           -x          x help
           -a          a help
           -b          b help
           -y          y help
           -c          c help
+          -z          z help
         `
 }
 
 
 ;(new class TestMutuallyExclusiveInGroup extends MEMixin_TestCase {
 
-    get_parser({ required = undefined } = {}) {
-        let parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
-        let titled_group = parser.add_argument_group({
+    get_parser ({ required = undefined } = {}) {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+        const titled_group = parser.add_argument_group({
             title: 'Titled group', description: 'Group description' })
-        let mutex_group =
+        const mutex_group =
             titled_group.add_mutually_exclusive_group({ required })
         mutex_group.add_argument('--bar', { help: 'bar help' })
         mutex_group.add_argument('--baz', { help: 'baz help' })
@@ -3099,7 +3989,7 @@ class TestMutuallyExclusiveOptionalsMixed extends MEMixin_TestCase {
         `
     help = `\
 
-        optional arguments:
+        options:
           -h, --help  show this help message and exit
 
         Titled group:
@@ -3113,100 +4003,176 @@ class TestMutuallyExclusiveOptionalsMixed extends MEMixin_TestCase {
 
 class TestMutuallyExclusiveOptionalsAndPositionalsMixed extends MEMixin_TestCase {
 
-    get_parser({ required = undefined } = {}) {
-        let parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+    get_parser ({ required = undefined } = {}) {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
         parser.add_argument('x', { help: 'x help' })
         parser.add_argument('-y', { action: 'store_true', help: 'y help' })
-        let group = parser.add_mutually_exclusive_group({ required })
+        const group = parser.add_mutually_exclusive_group({ required })
         group.add_argument('a', { nargs: '?', help: 'a help' })
         group.add_argument('-b', { action: 'store_true', help: 'b help' })
         group.add_argument('-c', { action: 'store_true', help: 'c help' })
+        parser.add_argument('-z', { action: 'store_true', help: 'z help' })
         return parser
     }
 
     failures = ['X A -b', '-b -c', '-c X A']
     successes = [
-        ['X A', NS({ a: 'A', b: false, c: false, x: 'X', y: false })],
-        ['X -b', NS({ a: undefined, b: true, c: false, x: 'X', y: false })],
-        ['X -c', NS({ a: undefined, b: false, c: true, x: 'X', y: false })],
-        ['X A -y', NS({ a: 'A', b: false, c: false, x: 'X', y: true })],
-        ['X -y -b', NS({ a: undefined, b: true, c: false, x: 'X', y: true })],
+        ['X A', NS({ a: 'A', b: false, c: false, x: 'X', y: false, z: false })],
+        ['X -b', NS({ a: undefined, b: true, c: false, x: 'X', y: false, z: false })],
+        ['X -c', NS({ a: undefined, b: false, c: true, x: 'X', y: false, z: false })],
+        ['X A -y', NS({ a: 'A', b: false, c: false, x: 'X', y: true, z: false })],
+        ['X -y -b', NS({ a: undefined, b: true, c: false, x: 'X', y: true, z: false })],
     ]
     successes_when_not_required = [
-        ['X', NS({ a: undefined, b: false, c: false, x: 'X', y: false })],
-        ['X -y', NS({ a: undefined, b: false, c: false, x: 'X', y: true })],
+        ['X', NS({ a: undefined, b: false, c: false, x: 'X', y: false, z: false })],
+        ['X -y', NS({ a: undefined, b: false, c: false, x: 'X', y: true, z: false })],
     ]
 
-    usage_when_required = `\
-        usage: PROG [-h] [-y] [-b] [-c] x [a]
+    usage_when_not_required = `\
+        usage: PROG [-h] [-y] [-z] x [-b | -c | a]
         `
-    usage_when_not_required = this.usage_when_required
+    usage_when_required = `\
+        usage: PROG [-h] [-y] [-z] x (-b | -c | a)
+        `
     help = `\
 
         positional arguments:
           x           x help
           a           a help
 
-        optional arguments:
+        options:
           -h, --help  show this help message and exit
           -y          y help
           -b          b help
           -c          c help
+          -z          z help
         `
 }
 
-;(new class TestMutuallyExclusiveNested extends MEMixin_TestCase {
 
-    get_parser({ required = undefined } = {}) {
-        let parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
-        let group = parser.add_mutually_exclusive_group({ required })
-        group.add_argument('-a')
-        group.add_argument('-b')
-        let group2 = group.add_mutually_exclusive_group({ required })
-        group2.add_argument('-c')
-        group2.add_argument('-d')
-        let group3 = group2.add_mutually_exclusive_group({ required })
-        group3.add_argument('-e')
-        group3.add_argument('-f')
+class TestMutuallyExclusiveOptionalOptional extends MEMixin_TestCase {
+
+    get_parser ({ required = undefined } = {}) {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+        const group = parser.add_mutually_exclusive_group({ required })
+        group.add_argument('--foo')
+        group.add_argument('--bar', { nargs: '?' })
         return parser
     }
 
-    usage_when_not_required = `\
-        usage: PROG [-h] [-a A | -b B | [-c C | -d D | [-e E | -f F]]]
-        `
+    failures = [
+        '--foo X --bar Y',
+        '--foo X --bar',
+    ]
+    successes = [
+        ['--foo X', NS({ foo: 'X', bar: undefined })],
+        ['--bar X', NS({ foo: undefined, bar: 'X' })],
+        ['--bar', NS({ foo: undefined, bar: undefined })],
+    ]
+    successes_when_not_required = [
+        ['', NS({ foo: undefined, bar: undefined })],
+    ]
     usage_when_required = `\
-        usage: PROG [-h] (-a A | -b B | (-c C | -d D | (-e E | -f F)))
+        usage: PROG [-h] (--foo FOO | --bar [BAR])
         `
-
+    usage_when_not_required = `\
+        usage: PROG [-h] [--foo FOO | --bar [BAR]]
+        `
     help = `\
 
-        optional arguments:
-          -h, --help  show this help message and exit
-          -a A
-          -b B
-          -c C
-          -d D
-          -e E
-          -f F
+        options:
+          -h, --help   show this help message and exit
+          --foo FOO
+          --bar [BAR]
         `
+}
 
-    // We are only interested in testing the behavior of format_usage().
-    test_failures_when_not_required = undefined
-    test_failures_when_required = undefined
-    test_successes_when_not_required = undefined
-    test_successes_when_required = undefined
-}).run()
+
+class TestMutuallyExclusiveOptionalWithDefault extends MEMixin_TestCase {
+
+    get_parser ({ required = undefined } = {}) {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+        const group = parser.add_mutually_exclusive_group({ required })
+        group.add_argument('--foo')
+        group.add_argument('--bar', { type: Boolean, default: true })
+        return parser
+    }
+
+    failures = [
+        '--foo X --bar Y',
+        '--foo X --bar=',
+    ]
+    successes = [
+        ['--foo X', NS({ foo: 'X', bar: true })],
+        ['--bar X', NS({ foo: undefined, bar: true })],
+        ['--bar=', NS({ foo: undefined, bar: false })],
+    ]
+    successes_when_not_required = [
+        ['', NS({ foo: undefined, bar: true })],
+    ]
+    usage_when_required = `\
+        usage: PROG [-h] (--foo FOO | --bar BAR)
+        `
+    usage_when_not_required = `\
+        usage: PROG [-h] [--foo FOO | --bar BAR]
+        `
+    help = `\
+
+        options:
+          -h, --help  show this help message and exit
+          --foo FOO
+          --bar BAR
+        `
+}
+
+
+class TestMutuallyExclusivePositionalWithDefault extends MEMixin_TestCase {
+
+    get_parser ({ required = undefined } = {}) {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+        const group = parser.add_mutually_exclusive_group({ required })
+        group.add_argument('--foo')
+        group.add_argument('bar', { nargs: '?', type: Boolean, default: true })
+        return parser
+    }
+
+    failures = [
+        '--foo X Y',
+    ]
+    successes = [
+        ['--foo X', NS({ foo: 'X', bar: true })],
+        ['X', NS({ foo: undefined, bar: true })],
+    ]
+    successes_when_not_required = [
+        ['', NS({ foo: undefined, bar: true })],
+    ]
+    usage_when_required = `\
+        usage: PROG [-h] (--foo FOO | bar)
+        `
+    usage_when_not_required = `\
+        usage: PROG [-h] [--foo FOO | bar]
+        `
+    help = `\
+
+        positional arguments:
+          bar
+
+        options:
+          -h, --help  show this help message and exit
+          --foo FOO
+        `
+}
 
 // =================================================
 // Mutually exclusive group in parent parser tests
 // =================================================
 
-function MEPBase(cls) {
+function MEPBase (cls) {
 
     return class MEPBase extends cls {
-        get_parser({ required = undefined } = {}) {
-            let parent = super.get_parser({ required })
-            let parser = new ErrorRaisingArgumentParser({
+        get_parser ({ required = undefined } = {}) {
+            const parent = super.get_parser({ required })
+            const parser = new ErrorRaisingArgumentParser({
                 prog: parent.prog, add_help: false, parents: [parent] })
             return parser
         }
@@ -3254,14 +4220,19 @@ function MEPBase(cls) {
     MEPBase(TestMutuallyExclusiveOptionalsAndPositionalsMixed) {}).run()
 
 
+;(new TestMutuallyExclusiveOptionalOptional()).run()
+;(new TestMutuallyExclusiveOptionalWithDefault()).run()
+;(new TestMutuallyExclusivePositionalWithDefault()).run()
+
+
 // =================
 // Set default tests
 // =================
 
 ;(new class TestSetDefaults extends TestCase {
 
-    test_set_defaults_no_args() {
-        let parser = new ErrorRaisingArgumentParser()
+    test_set_defaults_no_args () {
+        const parser = new ErrorRaisingArgumentParser()
         parser.set_defaults({ x: 'foo' })
         parser.set_defaults({ y: 'bar', z: 1 })
         this.assertEqual(NS({ x: 'foo', y: 'bar', z: 1 }),
@@ -3274,8 +4245,8 @@ function MEPBase(cls) {
                          parser.parse_args([], NS({ x: 'baz', z: 2 })))
     }
 
-    test_set_defaults_with_args() {
-        let parser = new ErrorRaisingArgumentParser()
+    test_set_defaults_with_args () {
+        const parser = new ErrorRaisingArgumentParser()
         parser.set_defaults({ x: 'foo', y: 'bar' })
         parser.add_argument('-x', { default: 'xfoox' })
         this.assertEqual(NS({ x: 'xfoox', y: 'bar' }),
@@ -3292,33 +4263,33 @@ function MEPBase(cls) {
                          parser.parse_args('-x 1'.split(' '), NS({ x: 'baz' })))
     }
 
-    test_set_defaults_subparsers() {
-        let parser = new ErrorRaisingArgumentParser()
+    test_set_defaults_subparsers () {
+        const parser = new ErrorRaisingArgumentParser()
         parser.set_defaults({ x: 'foo' })
-        let subparsers = parser.add_subparsers()
-        let parser_a = subparsers.add_parser('a')
+        const subparsers = parser.add_subparsers()
+        const parser_a = subparsers.add_parser('a')
         parser_a.set_defaults({ y: 'bar' })
         this.assertEqual(NS({ x: 'foo', y: 'bar' }),
                          parser.parse_args('a'.split(' ')))
     }
 
-    test_set_defaults_parents() {
-        let parent = new ErrorRaisingArgumentParser({ add_help: false })
+    test_set_defaults_parents () {
+        const parent = new ErrorRaisingArgumentParser({ add_help: false })
         parent.set_defaults({ x: 'foo' })
-        let parser = new ErrorRaisingArgumentParser({ parents: [parent] })
+        const parser = new ErrorRaisingArgumentParser({ parents: [parent] })
         this.assertEqual(NS({ x: 'foo' }), parser.parse_args([]))
     }
 
-    test_set_defaults_on_parent_and_subparser() {
-        let parser = argparse.ArgumentParser()
-        let xparser = parser.add_subparsers().add_parser('X')
+    test_set_defaults_on_parent_and_subparser () {
+        const parser = argparse.ArgumentParser()
+        const xparser = parser.add_subparsers().add_parser('X')
         parser.set_defaults({ foo: 1 })
         xparser.set_defaults({ foo: 2 })
         this.assertEqual(NS({ foo: 2 }), parser.parse_args(['X']))
     }
 
-    test_set_defaults_same_as_add_argument() {
-        let parser = new ErrorRaisingArgumentParser()
+    test_set_defaults_same_as_add_argument () {
+        const parser = new ErrorRaisingArgumentParser()
         parser.set_defaults({ w: 'W', x: 'X', y: 'Y', z: 'Z' })
         parser.add_argument('-w')
         parser.add_argument('-x', { default: 'XX' })
@@ -3335,10 +4306,10 @@ function MEPBase(cls) {
                          parser.parse_args([]))
     }
 
-    test_set_defaults_same_as_add_argument_group() {
-        let parser = new ErrorRaisingArgumentParser()
+    test_set_defaults_same_as_add_argument_group () {
+        const parser = new ErrorRaisingArgumentParser()
         parser.set_defaults({ w: 'W', x: 'X', y: 'Y', z: 'Z' })
-        let group = parser.add_argument_group('foo')
+        const group = parser.add_argument_group('foo')
         group.add_argument('-w')
         group.add_argument('-x', { default: 'XX' })
         group.add_argument('y', { nargs: '?' })
@@ -3362,8 +4333,8 @@ function MEPBase(cls) {
 
 ;(new class TestGetDefault extends TestCase {
 
-    test_get_default() {
-        let parser = new ErrorRaisingArgumentParser()
+    test_get_default () {
+        const parser = new ErrorRaisingArgumentParser()
         this.assertIsNone(parser.get_default("foo"))
         this.assertIsNone(parser.get_default("bar"))
 
@@ -3387,14 +4358,14 @@ function MEPBase(cls) {
 
 ;(new class TestNamespaceContainsSimple extends TestCase {
 
-    test_empty() {
-        let ns = argparse.Namespace()
+    test_empty () {
+        const ns = argparse.Namespace()
         this.assertNotIn('', ns)
         this.assertNotIn('x', ns)
     }
 
-    test_non_empty() {
-        let ns = argparse.Namespace({ x: 1, y: 2 })
+    test_non_empty () {
+        const ns = argparse.Namespace({ x: 1, y: 2 })
         this.assertNotIn('', ns)
         this.assertIn('x', ns)
         this.assertIn('y', ns)
@@ -3409,61 +4380,63 @@ function MEPBase(cls) {
 
 class HelpTestCase extends TestCase {
 
-    constructor() {
+    constructor () {
         super()
+        this.force_not_colorized = new Set()
 
         class AddTests {
 
-            constructor(test_class, func_suffix, std_name) {
+            constructor (test_class, func_suffix, std_name) {
                 this.func_suffix = func_suffix
                 this.std_name = std_name
 
-                for (let test_func of [this.test_format,
+                for (const test_func of [this.test_format,
                                        this.test_print,
                                        this.test_print_file]) {
-                    let test_name = sub('%s_%s', test_func.name, func_suffix)
+                    const test_name = sub('%s_%s', test_func.name, func_suffix)
                     test_class[test_name] = () => test_func.call(this, test_class)
+                    test_class.force_not_colorized.add(test_name)
                 }
             }
 
-            _get_parser(tester) {
-                let parser = new argparse.ArgumentParser(...tester.parser_signature)
-                for (let argument_sig of tester.argument_signatures || []) {
+            _get_parser (tester) {
+                const parser = new argparse.ArgumentParser(...tester.parser_signature)
+                for (const argument_sig of tester.argument_signatures || []) {
                     parser.add_argument(...argument_sig)
                 }
-                let group_sigs = tester.argument_group_signatures || []
-                for (let [ group_sig, argument_sigs ] of group_sigs) {
-                    let group = parser.add_argument_group(...group_sig)
-                    for (let argument_sig of argument_sigs) {
+                const group_sigs = tester.argument_group_signatures || []
+                for (const [group_sig, argument_sigs] of group_sigs) {
+                    const group = parser.add_argument_group(...group_sig)
+                    for (const argument_sig of argument_sigs) {
                         group.add_argument(...argument_sig)
                     }
                 }
-                let subparsers_sigs = tester.subparsers_signatures || []
+                const subparsers_sigs = tester.subparsers_signatures || []
                 if (subparsers_sigs.length) {
-                    let subparsers = parser.add_subparsers()
-                    for (let subparser_sig of subparsers_sigs) {
+                    const subparsers = parser.add_subparsers()
+                    for (const subparser_sig of subparsers_sigs) {
                         subparsers.add_parser(...subparser_sig)
                     }
                 }
                 return parser
             }
 
-            _test(tester, parser_text) {
+            _test (tester, parser_text) {
                 let expected_text = tester[this.func_suffix]
                 expected_text = textwrap.dedent(expected_text)
                 tester.assertEqual(expected_text, parser_text)
             }
 
-            test_format(tester) {
-                let parser = this._get_parser(tester)
-                let format = parser[sub('format_%s', this.func_suffix)]
+            test_format (tester) {
+                const parser = this._get_parser(tester)
+                const format = parser[sub('format_%s', this.func_suffix)]
                 this._test(tester, format.call(parser))
             }
 
-            test_print(tester) {
-                let parser = this._get_parser(tester)
-                let print_ = parser[sub('print_%s', this.func_suffix)]
-                let old_stream = Object.getOwnPropertyDescriptor(process, this.std_name)
+            test_print (tester) {
+                const parser = this._get_parser(tester)
+                const print_ = parser[sub('print_%s', this.func_suffix)]
+                const old_stream = Object.getOwnPropertyDescriptor(process, this.std_name)
                 Object.defineProperty(process, this.std_name, { value: new StdIOBuffer() })
                 let parser_text
                 try {
@@ -3475,18 +4448,18 @@ class HelpTestCase extends TestCase {
                 this._test(tester, parser_text)
             }
 
-            test_print_file(tester) {
-                let parser = this._get_parser(tester)
-                let print_ = parser[sub('print_%s', this.func_suffix)]
-                let sfile = new StdIOBuffer()
+            test_print_file (tester) {
+                const parser = this._get_parser(tester)
+                const print_ = parser[sub('print_%s', this.func_suffix)]
+                const sfile = new StdIOBuffer()
                 print_.call(parser, sfile)
-                let parser_text = sfile.getvalue()
+                const parser_text = sfile.getvalue()
                 this._test(tester, parser_text)
             }
         }
 
         // add tests for {format,print}_{usage,help}
-        for (let [ func_suffix, std_name ] of [['usage', 'stdout'],
+        for (const [func_suffix, std_name] of [['usage', 'stdout'],
                                                ['help', 'stdout']]) {
             // eslint-disable-next-line no-new
             new AddTests(this, func_suffix, std_name)
@@ -3526,7 +4499,7 @@ class TestHelpBiggerOptionalsBase extends HelpTestCase {
           foo            FOO HELP
           bar            BAR HELP
 
-        optional arguments:
+        options:
           -h, --help     show this help message and exit
           -v, --version  show program's version number and exit
           -x             X HELP
@@ -3544,7 +4517,7 @@ class TestHelpBiggerOptionalsBase extends HelpTestCase {
      *  TestCase prevents "COLUMNS" from being too small in the tests themselves,
      *  but we don't want any exceptions thrown in such cases. Only ugly representation.
      */
-    setUp() {
+    setUp () {
         process.env.COLUMNS = '15'
     }
 
@@ -3567,7 +4540,7 @@ class TestHelpBiggerOptionalsBase extends HelpTestCase {
           bar
             BAR HELP
 
-        optional arguments:
+        options:
           -h, --help
             show this
             help
@@ -3617,7 +4590,7 @@ class TestHelpBiggerOptionalsBase extends HelpTestCase {
           foo            FOO HELP
           bar            BAR HELP
 
-        optional arguments:
+        options:
           -h, --help     show this help message and exit
           -v, --version  show program's version number and exit
           -x             X HELP
@@ -3659,7 +4632,7 @@ class TestHelpBiggerOptionalsBase extends HelpTestCase {
           ekiekiekifekang  EKI HELP
           bar              BAR HELP
 
-        optional arguments:
+        options:
           -h, --help       show this help message and exit
           -x               X HELP
           --y Y            Y HELP
@@ -3707,7 +4680,7 @@ multiple
         positional arguments:
           yyy         normal y help
 
-        optional arguments:
+        options:
           -h, --help  show this help message and exit
           -x XX       oddly formatted -x help
 
@@ -3748,7 +4721,7 @@ DD DD DD
 YHYH YHYH
                       YHYH YHYH YHYH YHYH YHYH YHYH YHYH YH
 
-        optional arguments:
+        options:
           -h, --help  show this help message and exit
           -x XX       XHH HXXHH HXXHH HXXHH HXXHH HXXHH HXXHH HXXHH HXXHH \
 HXXHH HXXHH
@@ -3792,7 +4765,7 @@ DD DD DD
 YHYH YHYH
                                 YHYH YHYH YHYH YHYH YHYH YHYH YHYH YHYH YHYH YH
 
-        optional arguments:
+        options:
           -h, --help            show this help message and exit
           -v, --version         show program's version number and exit
           -x XXXXXXXXXXXXXXXXXXXXXXXXX
@@ -3832,6 +4805,8 @@ VV VV VV
         Sig('--bar', { help: 'Whether to bar', default: true,
                        action: argparse.BooleanOptionalAction }),
         Sig('-f', '--foobar', '--barfoo', { action: argparse.BooleanOptionalAction }),
+        Sig('--bazz', { action: argparse.BooleanOptionalAction,
+                        default: argparse.SUPPRESS, help: 'Bazz!' }),
     ]
     argument_group_signatures = [
         [Sig('group'), [
@@ -3844,8 +4819,8 @@ VV VV VV
     usage = `\
         usage: PROG [-h] [-w W [W ...]] [-x [X ...]] [--foo | --no-foo]
                     [--bar | --no-bar]
-                    [-f | --foobar | --no-foobar | --barfoo | --no-barfoo] [-y [Y]]
-                    [-z Z Z Z]
+                    [-f | --foobar | --no-foobar | --barfoo | --no-barfoo]
+                    [--bazz | --no-bazz] [-y [Y]] [-z Z Z Z]
                     a b b [c] [d ...] e [e ...]
         `
     help = this.usage + `\
@@ -3855,19 +4830,43 @@ VV VV VV
           b                     b
           c                     c
 
-        optional arguments:
+        options:
           -h, --help            show this help message and exit
           -w W [W ...]          w
           -x [X ...]            x
           --foo, --no-foo       Whether to foo
-          --bar, --no-bar       Whether to bar (default: true)
+          --bar, --no-bar       Whether to bar
           -f, --foobar, --no-foobar, --barfoo, --no-barfoo
+          --bazz, --no-bazz     Bazz!
 
         group:
           -y [Y]                y
           -z Z Z Z              z
           d                     d
           e                     e
+        `
+    version = ''
+}).run()
+
+
+;(new class TestHelpUsageWithParentheses extends HelpTestCase {
+    parser_signature = Sig({ prog: 'PROG' })
+    argument_signatures = [
+        Sig('positional', { metavar: '(example) positional' }),
+        Sig('-p', '--optional', { metavar: '{1 (option A), 2 (option B)}' }),
+    ]
+
+    usage = `\
+        usage: PROG [-h] [-p {1 (option A), 2 (option B)}] (example) positional
+        `
+    help = this.usage + `\
+
+        positional arguments:
+          (example) positional
+
+        options:
+          -h, --help            show this help message and exit
+          -p, --optional {1 (option A), 2 (option B)}
         `
     version = ''
 }).run()
@@ -3926,7 +4925,7 @@ VV VV VV
           a
           b
 
-        optional arguments:
+        options:
           -h, --help  show this help message and exit
           -w W
           -x X
@@ -3961,7 +4960,7 @@ VV VV VV
           a
           b
 
-        optional arguments:
+        options:
           -h, --help            show this help message and exit
           -w WWWWWWWWWWWWWWWWWWWWWWWWW
           -x XXXXXXXXXXXXXXXXXXXXXXXXX
@@ -4026,7 +5025,7 @@ VV VV VV
           b
           c
 
-        optional arguments:
+        options:
           -h, --help            show this help message and exit
           -w WWWWWWWWWWWWWWWWWWWWWWWWW
           -x XXXXXXXXXXXXXXXXXXXXXXXXX
@@ -4062,7 +5061,7 @@ VV VV VV
           bbbbbbbbbbbbbbbbbbbbbbbbb
           ccccccccccccccccccccccccc
 
-        optional arguments:
+        options:
           -h, --help            show this help message and exit
           -x X
           -y Y
@@ -4099,7 +5098,7 @@ VV VV VV
           bbbbbbbbbbbbbbbbbbbbbbbbb
           ccccccccccccccccccccccccc
 
-        optional arguments:
+        options:
           -h, --help            show this help message and exit
           -x XXXXXXXXXXXXXXXXXXXXXXXXX
           -y YYYYYYYYYYYYYYYYYYYYYYYYY
@@ -4126,7 +5125,7 @@ VV VV VV
         `
     help = this.usage + `\
 
-        optional arguments:
+        options:
           -h, --help            show this help message and exit
           -x XXXXXXXXXXXXXXXXXXXXXXXXX
           -y YYYYYYYYYYYYYYYYYYYYYYYYY
@@ -4161,6 +5160,167 @@ VV VV VV
 }).run()
 
 
+;(new class TestHelpUsageMetavarsSpacesParentheses extends HelpTestCase {
+    // https://github.com/python/cpython/issues/62549
+    // https://github.com/python/cpython/issues/89743
+    parser_signature = Sig({ prog: 'PROG' })
+    argument_signatures = [
+        Sig('-n1', { metavar: '()', help: 'n1' }),
+        Sig('-o1', { metavar: '(1, 2)', help: 'o1' }),
+        Sig('-u1', { metavar: ' (uu) ', help: 'u1' }),
+        Sig('-v1', { metavar: '( vv )', help: 'v1' }),
+        Sig('-w1', { metavar: '(w)w', help: 'w1' }),
+        Sig('-x1', { metavar: 'x(x)', help: 'x1' }),
+        Sig('-y1', { metavar: 'yy)', help: 'y1' }),
+        Sig('-z1', { metavar: '(zz', help: 'z1' }),
+        Sig('-n2', { metavar: '[]', help: 'n2' }),
+        Sig('-o2', { metavar: '[1, 2]', help: 'o2' }),
+        Sig('-u2', { metavar: ' [uu] ', help: 'u2' }),
+        Sig('-v2', { metavar: '[ vv ]', help: 'v2' }),
+        Sig('-w2', { metavar: '[w]w', help: 'w2' }),
+        Sig('-x2', { metavar: 'x[x]', help: 'x2' }),
+        Sig('-y2', { metavar: 'yy]', help: 'y2' }),
+        Sig('-z2', { metavar: '[zz', help: 'z2' }),
+    ]
+
+    usage = `\
+        usage: PROG [-h] [-n1 ()] [-o1 (1, 2)] [-u1  (uu) ] [-v1 ( vv )] [-w1 (w)w]
+                    [-x1 x(x)] [-y1 yy)] [-z1 (zz] [-n2 []] [-o2 [1, 2]] [-u2  [uu] ]
+                    [-v2 [ vv ]] [-w2 [w]w] [-x2 x[x]] [-y2 yy]] [-z2 [zz]
+        `
+    help = this.usage + `\
+
+        options:
+          -h, --help  show this help message and exit
+          -n1 ()      n1
+          -o1 (1, 2)  o1
+          -u1  (uu)   u1
+          -v1 ( vv )  v1
+          -w1 (w)w    w1
+          -x1 x(x)    x1
+          -y1 yy)     y1
+          -z1 (zz     z1
+          -n2 []      n2
+          -o2 [1, 2]  o2
+          -u2  [uu]   u2
+          -v2 [ vv ]  v2
+          -w2 [w]w    w2
+          -x2 x[x]    x2
+          -y2 yy]     y2
+          -z2 [zz     z2
+        `
+    version = ''
+}).run()
+
+
+;(new class TestHelpUsageNoWhitespaceCrash extends TestCase {
+    force_color = false
+
+    test_all_suppressed_mutex_followed_by_long_arg () {
+        // https://github.com/python/cpython/issues/62090
+        // https://github.com/python/cpython/issues/96310
+        const parser = argparse.ArgumentParser({ prog: 'PROG' })
+        const mutex = parser.add_mutually_exclusive_group()
+        mutex.add_argument('--spam', { help: argparse.SUPPRESS })
+        parser.add_argument('--eggs-eggs-eggs-eggs-eggs-eggs')
+        const usage = textwrap.dedent(`\
+        usage: PROG [-h]
+                    [--eggs-eggs-eggs-eggs-eggs-eggs EGGS_EGGS_EGGS_EGGS_EGGS_EGGS]
+        `)
+        this.assertEqual(parser.format_usage(), usage)
+    }
+
+    test_newline_in_metavar () {
+        // https://github.com/python/cpython/issues/77048
+        const mapping = ['123456', '12345', '12345', '123']
+        const parser = argparse.ArgumentParser({ prog: '11111111111111' })
+        parser.add_argument('-v', '--verbose',
+                            { help: 'verbose mode', action: 'store_true' })
+        parser.add_argument('targets', {
+            help: 'installation targets',
+            nargs: '+',
+            metavar: mapping.join('\n')
+        })
+        const usage = textwrap.dedent(`\
+        usage: 11111111111111 [-h] [-v]
+                              123456
+        12345
+        12345
+        123 [123456
+        12345
+        12345
+        123 ...]
+        `)
+        this.assertEqual(parser.format_usage(), usage)
+    }
+
+    test_empty_metavar_required_arg () {
+        // https://github.com/python/cpython/issues/82091
+        const parser = argparse.ArgumentParser({ prog: 'PROG' })
+        parser.add_argument('--nil', { metavar: '', required: true })
+        parser.add_argument('--a', { metavar: 'A'.repeat(70) })
+        const usage =
+            'usage: PROG [-h] --nil \n' +
+            '            [--a AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' +
+            'AAAAAAAAAAAAAAAAAAAAAAA]\n'
+        this.assertEqual(parser.format_usage(), usage)
+    }
+
+    test_all_suppressed_mutex_with_optional_nargs () {
+        // https://github.com/python/cpython/issues/98666
+        const parser = argparse.ArgumentParser({ prog: 'PROG' })
+        const mutex = parser.add_mutually_exclusive_group()
+        mutex.add_argument('--param1', {
+            nargs: '?', const: 'default', metavar: 'NAME', help: argparse.SUPPRESS
+        })
+        mutex.add_argument('--param2', {
+            nargs: '?', const: 'default', metavar: 'NAME', help: argparse.SUPPRESS
+        })
+        const usage = 'usage: PROG [-h]\n'
+        this.assertEqual(parser.format_usage(), usage)
+    }
+
+    test_long_mutex_groups_wrap () {
+        const parser = argparse.ArgumentParser({ prog: 'PROG' })
+        const g = parser.add_mutually_exclusive_group()
+        g.add_argument('--op1', { metavar: 'MET', nargs: '?' })
+        g.add_argument('--op2', { metavar: ['MET1', 'MET2'], nargs: '*' })
+        g.add_argument('--op3', { nargs: '*' })
+        g.add_argument('--op4', { metavar: ['MET1', 'MET2'], nargs: '+' })
+        g.add_argument('--op5', { nargs: '+' })
+        g.add_argument('--op6', { nargs: 3 })
+        g.add_argument('--op7', { metavar: ['MET1', 'MET2', 'MET3'], nargs: 3 })
+
+        const usage = textwrap.dedent(`\
+        usage: PROG [-h] [--op1 [MET] | --op2 [MET1 [MET2 ...]] | --op3 [OP3 ...] |
+                    --op4 MET1 [MET2 ...] | --op5 OP5 [OP5 ...] | --op6 OP6 OP6 OP6 |
+                    --op7 MET1 MET2 MET3]
+        `)
+        this.assertEqual(parser.format_usage(), usage)
+    }
+
+    test_mutex_groups_with_mixed_optionals_positionals_wrap () {
+        // https://github.com/python/cpython/issues/75949
+        // Mutually exclusive groups containing both optionals and positionals
+        // should preserve pipe separators when the usage line wraps.
+        const parser = argparse.ArgumentParser({ prog: 'PROG' })
+        const g = parser.add_mutually_exclusive_group()
+        g.add_argument('-v', '--verbose', { action: 'store_true' })
+        g.add_argument('-q', '--quiet', { action: 'store_true' })
+        g.add_argument('-x', '--extra-long-option-name', { nargs: '?' })
+        g.add_argument('-y', '--yet-another-long-option', { nargs: '?' })
+        g.add_argument('positional', { nargs: '?' })
+
+        const usage = textwrap.dedent(`\
+        usage: PROG [-h]
+                    [-v | -q | -x [EXTRA_LONG_OPTION_NAME] |
+                    -y [YET_ANOTHER_LONG_OPTION] | positional]
+        `)
+        this.assertEqual(parser.format_usage(), usage)
+    }
+}).run()
+
+
 ;(new class TestHelpVariableExpansion extends HelpTestCase {
     /* Test that variables are expanded properly in help messages */
 
@@ -4170,7 +5330,7 @@ VV VV VV
             help: 'x %(prog)s %(default)s %(type)s %%' }),
         Sig('-y', { action: 'store_const', default: 42, const: 'XXX',
             help: 'y %(prog)s %(default)s %(const)s' }),
-        Sig('--foo', { choices: 'abc',
+        Sig('--foo', { choices: ['a', 'b', 'c'],
             help: 'foo %(prog)s %(default)s %(choices)s' }),
         Sig('--bar', { default: 'baz', choices: [1, 2], metavar: 'BBB',
             help: 'bar %(prog)s %(default)s %(dest)s' }),
@@ -4193,7 +5353,7 @@ VV VV VV
           spam           spam PROG undefined
           badger         badger PROG 0.5
 
-        optional arguments:
+        options:
           -h, --help     show this help message and exit
           -x X           x PROG undefined int %
           -y             y PROG 42 XXX
@@ -4219,7 +5379,7 @@ VV VV VV
         `)
     help = this.usage + `\
 
-        optional arguments:
+        options:
           -h, --help  show this help message and exit
         `
     version = ''
@@ -4253,7 +5413,7 @@ VV VV VV
         positional arguments:
           spam        spam help
 
-        optional arguments:
+        options:
           -h, --help  show this help message and exit
           --foo FOO   foo help
         `
@@ -4302,7 +5462,7 @@ VV VV VV
         positional arguments:
           spam        spam help
 
-        optional arguments:
+        options:
           -h, --help  show this help message and exit
           --foo FOO   foo help
         `
@@ -4324,7 +5484,7 @@ VV VV VV
         `
     help = this.usage + `\
 
-        optional arguments:
+        options:
           -h, --help  show this help message and exit
           --foo FOO   foo help
         `
@@ -4345,7 +5505,7 @@ VV VV VV
         `
     help = this.usage + `\
 
-        optional arguments:
+        options:
           -h, --help  show this help message and exit
           --foo FOO   foo help
         `
@@ -4367,9 +5527,9 @@ VV VV VV
         `
     help = this.usage + `\
 
-        optional arguments:
-          ^^foo              foo help
-          ;b BAR, ;;bar BAR  bar help
+        options:
+          ^^foo          foo help
+          ;b, ;;bar BAR  bar help
         `
     version = ''
 }).run()
@@ -4392,7 +5552,7 @@ VV VV VV
         positional arguments:
           spam       spam help
 
-        optional arguments:
+        options:
           --foo FOO  foo help
         `
     version = ''
@@ -4416,7 +5576,7 @@ VV VV VV
         positional arguments:
           spam
 
-        optional arguments:
+        options:
           -h, --help  show this help message and exit
           --foo FOO
         `
@@ -4424,7 +5584,7 @@ VV VV VV
 }).run()
 
 
-;(new class TestHelpTupleMetavar extends HelpTestCase {
+;(new class TestHelpTupleMetavarOptional extends HelpTestCase {
     /* Test specifying metavar as a tuple */
 
     parser_signature = Sig({ prog: 'PROG' })
@@ -4441,12 +5601,41 @@ VV VV VV
         `
     help = this.usage + `\
 
-        optional arguments:
+        options:
           -h, --help        show this help message and exit
           -w W1 [W2 ...]    w
           -x [X1 [X2 ...]]  x
           -y Y1 Y2 Y3       y
           -z [Z1]           z
+        `
+    version = ''
+}).run()
+
+
+;(new class TestHelpTupleMetavarPositional extends HelpTestCase {
+    /* Test specifying metavar on a Positional as a tuple */
+
+    parser_signature = Sig({ prog: 'PROG' })
+    argument_signatures = [
+        Sig('w', { help: 'w help', nargs: '+', metavar: ['W1', 'W2'] }),
+        Sig('x', { help: 'x help', nargs: '*', metavar: ['X1', 'X2'] }),
+        Sig('y', { help: 'y help', nargs: 3, metavar: ['Y1', 'Y2', 'Y3'] }),
+        Sig('z', { help: 'z help', nargs: '?', metavar: ['Z1'] }),
+    ]
+    argument_group_signatures = []
+    usage = `\
+        usage: PROG [-h] W1 [W2 ...] [X1 [X2 ...]] Y1 Y2 Y3 [Z1]
+        `
+    help = this.usage + `\
+
+        positional arguments:
+          W1 W2       w help
+          X1 X2       x help
+          Y1 Y2 Y3    y help
+          Z1          z help
+
+        options:
+          -h, --help  show this help message and exit
         `
     version = ''
 }).run()
@@ -4486,7 +5675,7 @@ VV VV VV
         positional arguments:
           spam        spam help
 
-        optional arguments:
+        options:
           -h, --help  show this help message and exit
           --foo FOO       foo help should also
                       appear as given here
@@ -4536,7 +5725,7 @@ VV VV VV
         positional arguments:
           spam        spam help
 
-        optional arguments:
+        options:
           -h, --help  show this help message and exit
           --foo FOO   foo help should not retain this odd formatting
 
@@ -4561,6 +5750,12 @@ VV VV VV
     argument_signatures = [
         Sig('--foo', { help: 'foo help - oh and by the way, %(default)s' }),
         Sig('--bar', { action: 'store_true', help: 'bar help' }),
+        Sig('--required', { required: true, help: 'some help' }),
+        Sig('--taz', { action: argparse.BooleanOptionalAction,
+            help: 'Whether to taz it', default: true }),
+        Sig('--corge', { action: argparse.BooleanOptionalAction,
+            help: 'Whether to corge it', default: argparse.SUPPRESS }),
+        Sig('--quux', { help: 'Set the quux', default: 42 }),
         Sig('spam', { help: 'spam help' }),
         Sig('badger', { nargs: '?', default: 'wooden', help: 'badger help' }),
     ]
@@ -4569,25 +5764,31 @@ VV VV VV
          [Sig('--baz', { type: 'int', default: 42, help: 'baz help' })]],
     ]
     usage = `\
-        usage: PROG [-h] [--foo FOO] [--bar] [--baz BAZ] spam [badger]
+        usage: PROG [-h] [--foo FOO] [--bar] --required REQUIRED [--taz | --no-taz]
+                    [--corge | --no-corge] [--quux QUUX] [--baz BAZ]
+                    spam [badger]
         `
     help = this.usage + `\
 
         description
 
         positional arguments:
-          spam        spam help
-          badger      badger help (default: wooden)
+          spam                 spam help
+          badger               badger help (default: wooden)
 
-        optional arguments:
-          -h, --help  show this help message and exit
-          --foo FOO   foo help - oh and by the way, undefined
-          --bar       bar help (default: false)
+        options:
+          -h, --help           show this help message and exit
+          --foo FOO            foo help - oh and by the way, undefined
+          --bar                bar help (default: false)
+          --required REQUIRED  some help
+          --taz, --no-taz      Whether to taz it (default: true)
+          --corge, --no-corge  Whether to corge it
+          --quux QUUX          Set the quux (default: 42)
 
         title:
           description
 
-          --baz BAZ   baz help (default: 42)
+          --baz BAZ            baz help (default: 42)
         `
     version = ''
 }).run()
@@ -4605,7 +5806,7 @@ VV VV VV
 
         description
 
-        optional arguments:
+        options:
           -h, --help     show this help message and exit
           -V, --version  show program's version number and exit
         `
@@ -4632,7 +5833,7 @@ VV VV VV
         positional arguments:
           spam        spam help
 
-        optional arguments:
+        options:
           -h, --help  show this help message and exit
           --foo FOO   foo help
         `
@@ -4645,7 +5846,7 @@ VV VV VV
                              description: 'display some subcommands' })
     argument_signatures = [Sig('-v', '--version', { action: 'version', version: '0.1' })]
 
-    subparsers_signatures = [ 'a', 'b', 'c', 'd', 'e' ].map(name => Sig({ name }))
+    subparsers_signatures = ['a', 'b', 'c', 'd', 'e'].map(name => Sig({ name }))
 
     usage = `\
         usage: PROG [-h] [-v] {a,b,c,d,e} ...
@@ -4658,7 +5859,7 @@ VV VV VV
         positional arguments:
           {a,b,c,d,e}
 
-        optional arguments:
+        options:
           -h, --help     show this help message and exit
           -v, --version  show program's version number and exit
         `
@@ -4680,7 +5881,7 @@ VV VV VV
                        ['d', 'd subcommand help'],
                        ['e', 'e subcommand help']]
 
-    subparsers_signatures = this.subcommand_data.map(([ name, help ]) => Sig({ name, help }))
+    subparsers_signatures = this.subcommand_data.map(([name, help]) => Sig({ name, help }))
 
     usage = `\
         usage: PROG [-h] [-v] {a,b,c,d,e} ...
@@ -4698,7 +5899,7 @@ VV VV VV
             d            d subcommand help
             e            e subcommand help
 
-        optional arguments:
+        options:
           -h, --help     show this help message and exit
           -v, --version  show program's version number and exit
         `
@@ -4730,12 +5931,114 @@ VV VV VV
         positional arguments:
           int
 
-        optional arguments:
+        options:
           -h, --help      show this help message and exit
           -b custom_type
           -c SOME FLOAT
         `
     version = ''
+}).run()
+
+
+;(new class TestHelpCustomHelpFormatter extends TestCase {
+    force_color = false
+
+    test_custom_formatter_function () {
+        function custom_formatter (options) {
+            return argparse.RawTextHelpFormatter({
+                ...options,
+                indent_increment: 5
+            })
+        }
+
+        const parser = argparse.ArgumentParser({
+            prog: 'PROG',
+            prefix_chars: '-+',
+            formatter_class: custom_formatter
+        })
+        parser.add_argument('+f', '++foo', { help: 'foo help' })
+        parser.add_argument('spam', { help: 'spam help' })
+
+        const parser_help = parser.format_help()
+        this.assertEqual(parser_help, textwrap.dedent(`\
+            usage: PROG [-h] [+f FOO] spam
+
+            positional arguments:
+                 spam           spam help
+
+            options:
+                 -h, --help     show this help message and exit
+                 +f, ++foo FOO  foo help
+        `))
+    }
+
+    test_custom_formatter_class () {
+        class CustomFormatter extends argparse.RawTextHelpFormatter {
+            constructor (options) {
+                super({ ...options, indent_increment: 5 })
+            }
+        }
+
+        const parser = argparse.ArgumentParser({
+            prog: 'PROG',
+            prefix_chars: '-+',
+            formatter_class: CustomFormatter
+        })
+        parser.add_argument('+f', '++foo', { help: 'foo help' })
+        parser.add_argument('spam', { help: 'spam help' })
+
+        const parser_help = parser.format_help()
+        this.assertEqual(parser_help, textwrap.dedent(`\
+            usage: PROG [-h] [+f FOO] spam
+
+            positional arguments:
+                 spam           spam help
+
+            options:
+                 -h, --help     show this help message and exit
+                 +f, ++foo FOO  foo help
+        `))
+    }
+
+    test_usage_long_subparser_command () {
+        /* Test that subparser commands are formatted correctly in help */
+        function custom_formatter (options) {
+            return argparse.RawTextHelpFormatter({
+                ...options,
+                max_help_position: 50
+            })
+        }
+
+        const parent_parser = argparse.ArgumentParser({
+            prog: 'PROG',
+            formatter_class: custom_formatter
+        })
+
+        const cmd_subparsers = parent_parser.add_subparsers({
+            title: 'commands',
+            metavar: 'CMD',
+            help: 'command to use'
+        })
+        cmd_subparsers.add_parser('add', { help: 'add something' })
+        cmd_subparsers.add_parser('remove', { help: 'remove something' })
+        cmd_subparsers.add_parser('a-very-long-command', {
+            help: 'command that does something'
+        })
+
+        const parser_help = parent_parser.format_help()
+        this.assertEqual(parser_help, textwrap.dedent(`\
+            usage: PROG [-h] CMD ...
+
+            options:
+              -h, --help             show this help message and exit
+
+            commands:
+              CMD                    command to use
+                add                  add something
+                remove               remove something
+                a-very-long-command  command that does something
+        `))
+    }
 }).run()
 
 
@@ -4746,141 +6049,196 @@ VV VV VV
 ;(new class TestInvalidArgumentConstructors extends TestCase {
     /* Test a bunch of invalid Argument constructors */
 
-    assertTypeError(...args) {
-        let parser = argparse.ArgumentParser()
-        this.assertRaises(TypeError, () => parser.add_argument(...args))
+    assertTypeError (...args) {
+        let errmsg
+        const kwargs = args[args.length - 1]
+        if (kwargs && typeof kwargs === 'object' && 'errmsg' in kwargs) {
+            const options = { ...kwargs }
+            errmsg = options.errmsg
+            delete options.errmsg
+            args[args.length - 1] = options
+        }
+        const parser = argparse.ArgumentParser()
+        const cm = this.assertRaises(TypeError, () => parser.add_argument(...args))
+        if (errmsg !== undefined) {
+            this.assertRegex(String(cm.exception), new RegExp(errmsg))
+        }
     }
 
-    assertValueError(...args) {
-        let parser = argparse.ArgumentParser()
+    assertValueError (...args) {
+        let errmsg
+        const kwargs = args[args.length - 1]
+        if (kwargs && typeof kwargs === 'object' && 'errmsg' in kwargs) {
+            const options = { ...kwargs }
+            errmsg = options.errmsg
+            delete options.errmsg
+            args[args.length - 1] = options
+        }
+        const parser = argparse.ArgumentParser()
         // same as TypeError in js
-        this.assertRaises(TypeError, () => parser.add_argument(...args))
+        const cm = this.assertRaises(TypeError, () => parser.add_argument(...args))
+        if (errmsg !== undefined) {
+            this.assertRegex(String(cm.exception), new RegExp(errmsg))
+        }
     }
 
-    test_invalid_keyword_arguments() {
+    test_invalid_keyword_arguments () {
         this.assertTypeError('-x', { bar: undefined })
         this.assertTypeError('-y', { callback: 'foo' })
         this.assertTypeError('-y', { callback_args: [] })
         this.assertTypeError('-y', { callback_kwargs: {} })
     }
 
-    test_missing_destination() {
+    test_missing_destination () {
         this.assertTypeError()
-        for (let action of ['append', 'store']) {
+        for (const action of ['store', 'append', 'extend']) {
             this.assertTypeError({ action })
         }
     }
 
-    test_invalid_option_strings() {
-        this.assertValueError('--')
-        this.assertValueError('---')
+    test_invalid_option_strings () {
+        this.assertTypeError('-', { errmsg: 'dest= is required' })
+        this.assertTypeError('--', { errmsg: 'dest= is required' })
+        this.assertTypeError('---', { errmsg: 'dest= is required' })
     }
 
-    test_invalid_type() {
-        this.assertValueError('--foo', { type: 'Number' })
-        this.assertValueError('--foo', { type: [ Number, Number ] })
+    test_invalid_prefix () {
+        this.assertValueError('--foo', '+foo', {
+            errmsg: 'must start with a character'
+        })
     }
 
-/*
-    test_invalid_action() {
-        this.assertValueError('-x', action='foo')
-        this.assertValueError('foo', action='baz')
-        this.assertValueError('--foo', action=('store', 'append'))
-        parser = argparse.ArgumentParser()
-        with this.assertRaises(ValueError) as cm:
-            parser.add_argument("--foo", action="store-true")
-        this.assertIn('unknown action', str(cm.exception))
+    test_invalid_type () {
+        this.assertTypeError('--foo', {
+            type: 'Number', errmsg: "'Number' is not callable"
+        })
+        this.assertTypeError('--foo', {
+            type: [Number, Number], errmsg: 'is not callable'
+        })
     }
 
-    test_multiple_dest() {
-        parser = argparse.ArgumentParser()
-        parser.add_argument(dest='foo')
-        with this.assertRaises(ValueError) as cm:
-            parser.add_argument('bar', dest='baz')
-        this.assertIn('dest supplied twice for positional argument',
-                      str(cm.exception))
+    test_invalid_action () {
+        this.assertValueError('-x', { action: 'foo', errmsg: 'unknown action' })
+        this.assertValueError('foo', { action: 'baz', errmsg: 'unknown action' })
+        this.assertValueError('--foo', {
+            action: ['store', 'append'], errmsg: 'unknown action'
+        })
+        this.assertValueError('--foo', { action: 'store-true', errmsg: 'unknown action' })
     }
 
-    test_no_argument_actions() {
-        for action in ['store_const', 'store_true', 'store_false',
-                       'append_const', 'count']:
-            for attrs in [dict(type=int), dict(nargs='+'),
-                          dict(choices='ab')]:
-                this.assertTypeError('-x', action=action, **attrs)
+    test_invalid_help () {
+        this.assertValueError('--foo', {
+            help: '%Y-%m-%d', errmsg: 'badly formed help string'
+        })
+        this.assertValueError('--foo', {
+            help: '%(spam)s', errmsg: 'badly formed help string'
+        })
+        this.assertValueError('--foo', {
+            help: '%(prog)d', errmsg: 'badly formed help string'
+        })
     }
 
-    test_no_argument_no_const_actions() {
-        # options with zero arguments
-        for action in ['store_true', 'store_false', 'count']:
-
-            # const is always disallowed
-            this.assertTypeError('-x', const='foo', action=action)
-
-            # nargs is always disallowed
-            this.assertTypeError('-x', nargs='*', action=action)
+    test_multiple_dest () {
+        const parser = argparse.ArgumentParser()
+        parser.add_argument({ dest: 'foo' })
+        const cm = this.assertRaises(TypeError, () =>
+            parser.add_argument('bar', { dest: 'baz' }))
+        this.assertRegex(String(cm.exception),
+            /dest supplied twice for positional argument, did you mean metavar\?/)
     }
 
-    test_more_than_one_argument_actions() {
-        for action in ['store', 'append']:
-
-            # nargs=0 is disallowed
-            this.assertValueError('-x', nargs=0, action=action)
-            this.assertValueError('spam', nargs=0, action=action)
-
-            # const is disallowed with non-optional arguments
-            for nargs in [1, '*', '+']:
-                this.assertValueError('-x', const='foo',
-                                      nargs=nargs, action=action)
-                this.assertValueError('spam', const='foo',
-                                      nargs=nargs, action=action)
+    test_no_argument_actions () {
+        for (const action of ['store_const', 'store_true', 'store_false',
+                              'append_const', 'count']) {
+            for (const attrs of [{ type: 'int' }, { nargs: '+' },
+                                 { choices: ['a', 'b'] }]) {
+                this.assertTypeError('-x', { action, ...attrs })
+                this.assertTypeError('x', { action, ...attrs })
+            }
+            this.assertValueError('x', { action,
+                errmsg: `action '${action}' is not valid for positional arguments` })
+            this.assertTypeError('-x', { action, nargs: 0 })
+            this.assertValueError('x', { action, nargs: 0,
+                errmsg: 'nargs for positionals must be != 0' })
+        }
     }
 
-    test_required_const_actions() {
-        for action in ['store_const', 'append_const']:
+    test_more_than_one_argument_actions () {
+        for (const action of ['store', 'append', 'extend']) {
+            // nargs=0 is disallowed
+            const action_name = action === 'extend' ? 'append' : action
+            const errmsg = `nargs for ${action_name} actions must be != 0`
+            this.assertValueError('-x', { nargs: 0, action, errmsg })
+            this.assertValueError('spam', { nargs: 0, action,
+                errmsg: 'nargs for positionals must be != 0' })
+
+            // const is disallowed with non-optional arguments
+            for (const nargs of [1, '*', '+']) {
+                this.assertValueError('-x', { const: 'foo', nargs, action })
+                this.assertValueError('spam', { const: 'foo', nargs, action })
+            }
+        }
+    }
+
+
+    test_version_missing_params () {
+        this.assertTypeError('command', { action: 'version' })
+    }
+
+    test_no_argument_no_const_actions () {
+        // options with zero arguments
+        for (const action of ['store_true', 'store_false', 'count']) {
+            // const is always disallowed
+            this.assertTypeError('-x', { const: 'foo', action })
 
             // nargs is always disallowed
-            this.assertTypeError('-x', nargs='+', action=action)
+            this.assertTypeError('-x', { nargs: '*', action })
+        }
     }
 
-    test_parsers_action_missing_params() {
-        this.assertTypeError('command', action='parsers')
-        this.assertTypeError('command', action='parsers', prog='PROG')
-        this.assertTypeError('command', action='parsers',
-                             parser_class=argparse.ArgumentParser)
+    test_required_const_actions () {
+        for (const action of ['store_const', 'append_const']) {
+            // nargs is always disallowed
+            this.assertTypeError('-x', { nargs: '+', action })
+        }
     }
 
-    test_required_positional() {
-        this.assertTypeError('foo', required=True)
+    test_parsers_action_missing_params () {
+        this.assertTypeError('command', { action: 'parsers' })
+        this.assertTypeError('command', { action: 'parsers', prog: 'PROG' })
+        this.assertTypeError('command', {
+            action: 'parsers', parser_class: argparse.ArgumentParser
+        })
     }
 
-    test_user_defined_action() {
-
-        class Success(Exception):
-            pass
-
-        class Action(object):
-
-            def __init__(self,
-                         option_strings,
-                         dest,
-                         const,
-                         default,
-                         required=False):
-                if dest == 'spam':
-                    if const is Success:
-                        if default is Success:
-                            raise Success()
-
-            def __call__(self, *args, **kwargs):
-                pass
-
-        parser = argparse.ArgumentParser()
-        this.assertRaises(Success, parser.add_argument, '--spam',
-                          action=Action, default=Success, const=Success)
-        this.assertRaises(Success, parser.add_argument, 'spam',
-                          action=Action, default=Success, const=Success)
+    test_required_positional () {
+        this.assertTypeError('foo', { required: true })
     }
-*/
+
+    test_user_defined_action () {
+        class Success extends Error {}
+
+        class Action extends argparse.Action {
+            constructor (...args) {
+                super(...args)
+                if (this.dest === 'spam' &&
+                    this.const === Success &&
+                    this.default === Success) {
+                    throw new Success()
+                }
+            }
+
+            call () {}
+        }
+
+        const parser = argparse.ArgumentParser()
+        this.assertRaises(Success, () => parser.add_argument('--spam', {
+            action: Action, default: Success, const: Success
+        }))
+        this.assertRaises(Success, () => parser.add_argument('spam', {
+            action: Action, default: Success, const: Success
+        }))
+    }
 }).run()
 
 // ================================
@@ -4889,8 +6247,8 @@ VV VV VV
 
 ;(new class TestActionsReturned extends TestCase {
 
-    test_dest() {
-        let parser = argparse.ArgumentParser()
+    test_dest () {
+        const parser = argparse.ArgumentParser()
         let action = parser.add_argument('--foo')
         this.assertEqual(action.dest, 'foo')
         action = parser.add_argument('-b', '--bar')
@@ -4899,9 +6257,9 @@ VV VV VV
         this.assertEqual(action.dest, 'x')
     }
 
-    test_misc() {
-        let parser = argparse.ArgumentParser()
-        let action = parser.add_argument('--foo', { nargs: '?', const: 42,
+    test_misc () {
+        const parser = argparse.ArgumentParser()
+        const action = parser.add_argument('--foo', { nargs: '?', const: 42,
                                          default: 84, type: 'int', choices: [1, 2],
                                          help: 'FOO', metavar: 'BAR', dest: 'baz' })
         this.assertEqual(action.nargs, '?')
@@ -4921,14 +6279,15 @@ VV VV VV
 // ================================
 
 ;(new class TestConflictHandling extends TestCase {
+    force_not_colorized = new Set(['test_resolve_error'])
 
-    test_bad_type() {
+    test_bad_type () {
         this.assertRaises(TypeError,
                           () => argparse.ArgumentParser({ conflict_handler: 'foo' }))
     }
 
-    test_conflict_error() {
-        let parser = argparse.ArgumentParser()
+    test_conflict_error () {
+        const parser = argparse.ArgumentParser()
         parser.add_argument('-x')
         this.assertRaises(argparse.ArgumentError,
                           () => parser.add_argument('-x'))
@@ -4937,16 +6296,16 @@ VV VV VV
                           () => parser.add_argument('--spam'))
     }
 
-    test_resolve_error() {
-        let get_parser = argparse.ArgumentParser
-        let parser = get_parser({ prog: 'PROG', conflict_handler: 'resolve' })
+    test_resolve_error () {
+        const get_parser = argparse.ArgumentParser
+        const parser = get_parser({ prog: 'PROG', conflict_handler: 'resolve' })
 
         parser.add_argument('-x', { help: 'OLD X' })
         parser.add_argument('-x', { help: 'NEW X' })
         this.assertEqual(parser.format_help(), textwrap.dedent(`\
             usage: PROG [-h] [-x X]
 
-            optional arguments:
+            options:
               -h, --help  show this help message and exit
               -x X        NEW X
             `))
@@ -4956,11 +6315,27 @@ VV VV VV
         this.assertEqual(parser.format_help(), textwrap.dedent(`\
             usage: PROG [-h] [-x X] [--spam NEW_SPAM]
 
-            optional arguments:
+            options:
               -h, --help       show this help message and exit
               -x X             NEW X
               --spam NEW_SPAM
             `))
+    }
+
+    test_subparser_conflict () {
+        const parser = argparse.ArgumentParser()
+        const sp = parser.add_subparsers()
+        sp.add_parser('fullname', { aliases: ['alias'] })
+        let cm = this.assertRaises(TypeError, () => sp.add_parser('fullname'))
+        this.assertRegex(String(cm.exception), /conflicting subparser: fullname/)
+        cm = this.assertRaises(TypeError, () => sp.add_parser('alias'))
+        this.assertRegex(String(cm.exception), /conflicting subparser: alias/)
+        cm = this.assertRaises(TypeError, () =>
+            sp.add_parser('other', { aliases: ['fullname'] }))
+        this.assertRegex(String(cm.exception), /conflicting subparser alias: fullname/)
+        cm = this.assertRaises(TypeError, () =>
+            sp.add_parser('other', { aliases: ['alias'] }))
+        this.assertRegex(String(cm.exception), /conflicting subparser alias: alias/)
     }
 }).run()
 
@@ -4972,58 +6347,60 @@ VV VV VV
 ;(new class TestOptionalsHelpVersionActions extends TestCase {
     /* Test the help and version actions */
 
-    assertPrintHelpExit(parser, args_str) {
-        let cm = this.assertRaises(ArgumentParserError, () =>
+    force_color = false
+
+    assertPrintHelpExit (parser, args_str) {
+        const cm = this.assertRaises(ArgumentParserError, () =>
             parser.parse_args(args_str.split(/\s+/).filter(Boolean)))
         this.assertEqual(parser.format_help(), cm.exception.stdout)
     }
 
-    assertArgumentParserError(parser, ...args) {
+    assertArgumentParserError (parser, ...args) {
         this.assertRaises(ArgumentParserError, () => parser.parse_args(args))
     }
 
-    test_version() {
-        let parser = new ErrorRaisingArgumentParser()
+    test_version () {
+        const parser = new ErrorRaisingArgumentParser()
         parser.add_argument('-v', '--version', { action: 'version', version: '1.0' })
         this.assertPrintHelpExit(parser, '-h')
         this.assertPrintHelpExit(parser, '--help')
         this.assertNotIn('format_version', parser)
     }
 
-    test_version_format() {
-        let parser = new ErrorRaisingArgumentParser({ prog: 'PPP' })
+    test_version_format () {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PPP' })
         parser.add_argument('-v', '--version', { action: 'version', version: '%(prog)s 3.5' })
-        let cm = this.assertRaises(ArgumentParserError, () =>
+        const cm = this.assertRaises(ArgumentParserError, () =>
             parser.parse_args(['-v']))
         this.assertEqual('PPP 3.5\n', cm.exception.stdout)
     }
 
-    test_version_no_help() {
-        let parser = new ErrorRaisingArgumentParser({ add_help: false })
+    test_version_no_help () {
+        const parser = new ErrorRaisingArgumentParser({ add_help: false })
         parser.add_argument('-v', '--version', { action: 'version', version: '1.0' })
         this.assertArgumentParserError(parser, '-h')
         this.assertArgumentParserError(parser, '--help')
         this.assertNotIn('format_version', parser)
     }
 
-    test_version_action() {
-        let parser = new ErrorRaisingArgumentParser({ prog: 'XXX' })
+    test_version_action () {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'XXX' })
         parser.add_argument('-V', { action: 'version', version: '%(prog)s 3.7' })
-        let cm = this.assertRaises(ArgumentParserError, () =>
+        const cm = this.assertRaises(ArgumentParserError, () =>
             parser.parse_args(['-V']))
         this.assertEqual('XXX 3.7\n', cm.exception.stdout)
     }
 
-    test_no_help() {
-        let parser = new ErrorRaisingArgumentParser({ add_help: false })
+    test_no_help () {
+        const parser = new ErrorRaisingArgumentParser({ add_help: false })
         this.assertArgumentParserError(parser, '-h')
         this.assertArgumentParserError(parser, '--help')
         this.assertArgumentParserError(parser, '-v')
         this.assertArgumentParserError(parser, '--version')
     }
 
-    test_alternate_help_version() {
-        let parser = new ErrorRaisingArgumentParser()
+    test_alternate_help_version () {
+        const parser = new ErrorRaisingArgumentParser()
         parser.add_argument('-x', { action: 'help' })
         parser.add_argument('-y', { action: 'version' })
         this.assertPrintHelpExit(parser, '-x')
@@ -5032,18 +6409,18 @@ VV VV VV
         this.assertNotIn('format_version', parser)
     }
 
-    test_help_version_extra_arguments() {
-        let parser = new ErrorRaisingArgumentParser()
+    test_help_version_extra_arguments () {
+        const parser = new ErrorRaisingArgumentParser()
         parser.add_argument('--version', { action: 'version', version: '1.0' })
         parser.add_argument('-x', { action: 'store_true' })
         parser.add_argument('y')
 
         // try all combinations of valid prefixes and suffixes
-        let valid_prefixes = ['', '-x', 'foo', '-x bar', 'baz -x']
-        let valid_suffixes = valid_prefixes.concat(['--bad-option', 'foo bar baz'])
-        for (let prefix of valid_prefixes) {
+        const valid_prefixes = ['', '-x', 'foo', '-x bar', 'baz -x']
+        const valid_suffixes = valid_prefixes.concat(['--bad-option', 'foo bar baz'])
+        for (const prefix of valid_prefixes) {
             let format
-            for (let suffix of valid_suffixes) {
+            for (const suffix of valid_suffixes) {
                 format = sub('%s %%s %s', prefix, suffix)
             }
             this.assertPrintHelpExit(parser, sub(format, '-h'))
@@ -5061,74 +6438,78 @@ VV VV VV
 ;(new class TestStrings extends TestCase {
     /* Test str()  and repr() on Optionals and Positionals */
 
-    assertStringEqual(obj, result_string) {
-        let str = String, repr = util.inspect
-        for (let func of [str, repr]) {
+    assertStringEqual (obj, result_string) {
+        const str = String, repr = util.inspect
+        for (const func of [str, repr]) {
             this.assertEqual(func(obj), result_string)
         }
     }
 
-    test_optional() {
-        let option = argparse.Action({
+    test_optional () {
+        const option = argparse.Action({
             option_strings: ['--foo', '-a', '-b'],
             dest: 'b',
             type: 'int',
             nargs: '+',
             default: 42,
             choices: [1, 2, 3],
+            required: false,
             help: 'HELP',
             metavar: 'METAVAR' })
-        let string = (
+        const string = (
             "Action(option_strings=[ '--foo', '-a', '-b' ], dest='b', " +
             "nargs='+', const=undefined, default=42, type='int', " +
-            "choices=[ 1, 2, 3 ], help='HELP', metavar='METAVAR')")
+            "choices=[ 1, 2, 3 ], required=false, help='HELP', " +
+            "metavar='METAVAR', deprecated=false)")
         this.assertStringEqual(option, string)
     }
 
-    test_argument() {
-        let argument = argparse.Action({
+    test_argument () {
+        const argument = argparse.Action({
             option_strings: [],
             dest: 'x',
             type: Number,
             nargs: '?',
             default: 2.5,
             choices: [0.5, 1.5, 2.5],
+            required: true,
             help: 'H HH H',
             metavar: 'MV MV MV' })
-        let string = sub(
+        const string = sub(
             "Action(option_strings=[], dest='x', nargs='?', " +
             "const=undefined, default=2.5, type=%r, choices=[ 0.5, 1.5, 2.5 ], " +
-            "help='H HH H', metavar='MV MV MV')", Number)
+            "required=true, help='H HH H', metavar='MV MV MV', " +
+            "deprecated=false)", Number)
         this.assertStringEqual(argument, string)
     }
 
-    test_namespace() {
-        let ns = argparse.Namespace({ foo: 42, bar: 'spam' })
-        let string = "Namespace(foo=42, bar='spam')"
+    test_namespace () {
+        const ns = argparse.Namespace({ foo: 42, bar: 'spam' })
+        const string = "Namespace(foo=42, bar='spam')"
         this.assertStringEqual(ns, string)
     }
 
-    test_namespace_starkwargs_notidentifier() {
-        let ns = argparse.Namespace({'"': 'quote'})
-        let string = `Namespace(**{ '"': 'quote' })`
+    test_namespace_starkwargs_notidentifier () {
+        const ns = argparse.Namespace({'"': 'quote'})
+        const string = `Namespace(**{ '"': 'quote' })`
         this.assertStringEqual(ns, string)
     }
 
-    test_namespace_kwargs_and_starkwargs_notidentifier() {
-        let ns = argparse.Namespace({ a: 1, '"': 'quote'})
-        let string = `Namespace(a=1, **{ '"': 'quote' })`
+    test_namespace_kwargs_and_starkwargs_notidentifier () {
+        const ns = argparse.Namespace({ a: 1, '"': 'quote'})
+        const string = `Namespace(a=1, **{ '"': 'quote' })`
         this.assertStringEqual(ns, string)
     }
 
-    test_namespace_starkwargs_identifier() {
-        let ns = argparse.Namespace({valid: true})
-        let string = "Namespace(valid=true)"
+    test_namespace_starkwargs_identifier () {
+        const ns = argparse.Namespace({valid: true})
+        const string = "Namespace(valid=true)"
         this.assertStringEqual(ns, string)
     }
 
-    test_parser() {
-        let parser = argparse.ArgumentParser({ prog: 'PROG' })
-        let string = sub(
+    test_parser () {
+        const parser = argparse.ArgumentParser({ prog: 'PROG' })
+        const string = sub(
             "ArgumentParser(prog='PROG', usage=undefined, description=undefined, " +
             "formatter_class=%r, conflict_handler='error', " +
             "add_help=true)", argparse.HelpFormatter)
@@ -5142,17 +6523,17 @@ VV VV VV
 
 ;(new class TestNamespace extends TestCase {
 
-    test_constructor() {
-        let ns = argparse.Namespace({ a: 42, b: 'spam' })
+    test_constructor () {
+        const ns = argparse.Namespace({ a: 42, b: 'spam' })
         this.assertEqual(ns.a, 42)
         this.assertEqual(ns.b, 'spam')
     }
 
-    test_equality() {
-        let ns1 = argparse.Namespace({ a: 1, b: 2 })
-        let ns2 = argparse.Namespace({ b: 2, a: 1 })
-        let ns3 = argparse.Namespace({ a: 1 })
-        let ns4 = argparse.Namespace({ b: 2 })
+    test_equality () {
+        const ns1 = argparse.Namespace({ a: 1, b: 2 })
+        const ns2 = argparse.Namespace({ b: 2, a: 1 })
+        const ns3 = argparse.Namespace({ a: 1 })
+        const ns4 = argparse.Namespace({ b: 2 })
 
         this.assertEqual(ns1, ns2)
         this.assertNotEqual(ns1, ns3)
@@ -5169,9 +6550,9 @@ VV VV VV
 
 ;(new class TestArgumentError extends TestCase {
 
-    test_argument_error() {
-        let msg = "my error here"
-        let error = argparse.ArgumentError(undefined, msg)
+    test_argument_error () {
+        const msg = "my error here"
+        const error = argparse.ArgumentError(undefined, msg)
         this.assertEqual(error.message, msg)
     }
 }).run()
@@ -5181,16 +6562,17 @@ VV VV VV
 // =======================
 
 ;(new class TestArgumentTypeError extends TestCase {
+    force_not_colorized = new Set(['test_argument_type_error'])
 
-    test_argument_type_error() {
+    test_argument_type_error () {
 
-        function spam(/*string*/) {
+        function spam (/* string */) {
             throw argparse.ArgumentTypeError('spam!')
         }
 
-        let parser = new ErrorRaisingArgumentParser({ prog: 'PROG', add_help: false })
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG', add_help: false })
         parser.add_argument('x', { type: spam })
-        let cm = this.assertRaises(ArgumentParserError, () => parser.parse_args(['XXX']))
+        const cm = this.assertRaises(ArgumentParserError, () => parser.parse_args(['XXX']))
         this.assertEqual('usage: PROG x\nPROG: error: argument x: spam!\n',
                          cm.exception.stderr)
     }
@@ -5202,8 +6584,8 @@ VV VV VV
 
 ;(new class TestMessageContentError extends TestCase {
 
-    test_missing_argument_name_in_message() {
-        let parser = new ErrorRaisingArgumentParser({ prog: 'PROG', usage: '' })
+    test_missing_argument_name_in_message () {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG', usage: '' })
         parser.add_argument('req_pos', { type: 'str' })
         parser.add_argument('-req_opt', { type: 'int', required: true })
         parser.add_argument('need_one', { type: 'str', nargs: '+' })
@@ -5228,8 +6610,8 @@ VV VV VV
         this.assertRegex(msg, /need_one/)
     }
 
-    test_optional_optional_not_in_message() {
-        let parser = new ErrorRaisingArgumentParser({ prog: 'PROG', usage: '' })
+    test_optional_optional_not_in_message () {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG', usage: '' })
         parser.add_argument('req_pos', { type: 'str' })
         parser.add_argument('--req_opt', { type: 'int', required: true })
         parser.add_argument('--opt_opt', { type: Boolean, nargs: '?',
@@ -5248,13 +6630,13 @@ VV VV VV
         this.assertNotRegex(msg, /opt_opt/)
     }
 
-    test_optional_positional_not_in_message() {
-        let parser = new ErrorRaisingArgumentParser({ prog: 'PROG', usage: '' })
+    test_optional_positional_not_in_message () {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG', usage: '' })
         parser.add_argument('req_pos')
         parser.add_argument('optional_positional', { nargs: '?', default: 'eggs' })
-        let cm = this.assertRaises(ArgumentParserError, () =>
+        const cm = this.assertRaises(ArgumentParserError, () =>
             parser.parse_args([]))
-        let msg = String(cm.exception)
+        const msg = String(cm.exception)
         this.assertRegex(msg, /req_pos/)
         this.assertNotRegex(msg, /optional_positional/)
     }
@@ -5267,18 +6649,128 @@ VV VV VV
 
 ;(new class TestTypeFunctionCallOnlyOnce extends TestCase {
 
-    test_type_function_call_only_once() {
-        let spam = string_to_convert => {
+    test_type_function_call_only_once () {
+        const spam = string_to_convert => {
             this.assertEqual(string_to_convert, 'spam!')
             return 'foo_converted'
         }
 
-        let parser = argparse.ArgumentParser()
+        const parser = argparse.ArgumentParser()
         parser.add_argument('--foo', { type: spam, default: 'bar' })
-        let args = parser.parse_args('--foo spam!'.split(' '))
+        const args = parser.parse_args('--foo spam!'.split(' '))
         this.assertEqual(NS({ foo: 'foo_converted' }), args)
     }
 }).run()
+
+
+// ==============================================
+// Check that deprecated arguments output warning
+// ==============================================
+
+;(new class TestDeprecatedArguments extends TestCase {
+
+    test_deprecated_option () {
+        const parser = argparse.ArgumentParser()
+        parser.add_argument('-f', '--foo', { deprecated: true })
+
+        let stderr = captured_stderr(() => parser.parse_args(['--foo', 'spam']))
+        this.assertRegex(stderr, /warning: option '--foo' is deprecated/)
+        this.assertEqual(1, stderr.split('is deprecated').length - 1)
+
+        stderr = captured_stderr(() => parser.parse_args(['-f', 'spam']))
+        this.assertRegex(stderr, /warning: option '-f' is deprecated/)
+        this.assertEqual(1, stderr.split('is deprecated').length - 1)
+
+        stderr = captured_stderr(() =>
+            parser.parse_args(['--foo', 'spam', '-f', 'ham']))
+        this.assertRegex(stderr, /warning: option '--foo' is deprecated/)
+        this.assertRegex(stderr, /warning: option '-f' is deprecated/)
+        this.assertEqual(2, stderr.split('is deprecated').length - 1)
+
+        stderr = captured_stderr(() =>
+            parser.parse_args(['--foo', 'spam', '--foo', 'ham']))
+        this.assertRegex(stderr, /warning: option '--foo' is deprecated/)
+        this.assertEqual(1, stderr.split('is deprecated').length - 1)
+    }
+
+    test_deprecated_boolean_option () {
+        const parser = argparse.ArgumentParser()
+        parser.add_argument('-f', '--foo', {
+            action: argparse.BooleanOptionalAction,
+            deprecated: true
+        })
+
+        let stderr = captured_stderr(() => parser.parse_args(['--foo']))
+        this.assertRegex(stderr, /warning: option '--foo' is deprecated/)
+        this.assertEqual(1, stderr.split('is deprecated').length - 1)
+
+        stderr = captured_stderr(() => parser.parse_args(['-f']))
+        this.assertRegex(stderr, /warning: option '-f' is deprecated/)
+        this.assertEqual(1, stderr.split('is deprecated').length - 1)
+
+        stderr = captured_stderr(() => parser.parse_args(['--no-foo']))
+        this.assertRegex(stderr, /warning: option '--no-foo' is deprecated/)
+        this.assertEqual(1, stderr.split('is deprecated').length - 1)
+
+        stderr = captured_stderr(() => parser.parse_args(['--foo', '--no-foo']))
+        this.assertRegex(stderr, /warning: option '--foo' is deprecated/)
+        this.assertRegex(stderr, /warning: option '--no-foo' is deprecated/)
+        this.assertEqual(2, stderr.split('is deprecated').length - 1)
+    }
+
+    test_deprecated_arguments () {
+        const parser = argparse.ArgumentParser()
+        parser.add_argument('foo', { nargs: '?', deprecated: true })
+        parser.add_argument('bar', { nargs: '?', deprecated: true })
+
+        let stderr = captured_stderr(() => parser.parse_args([]))
+        this.assertEqual(0, stderr.split('is deprecated').length - 1)
+
+        stderr = captured_stderr(() => parser.parse_args(['spam']))
+        this.assertRegex(stderr, /warning: argument 'foo' is deprecated/)
+        this.assertEqual(1, stderr.split('is deprecated').length - 1)
+
+        stderr = captured_stderr(() => parser.parse_args(['spam', 'ham']))
+        this.assertRegex(stderr, /warning: argument 'foo' is deprecated/)
+        this.assertRegex(stderr, /warning: argument 'bar' is deprecated/)
+        this.assertEqual(2, stderr.split('is deprecated').length - 1)
+    }
+
+    test_deprecated_varargument () {
+        const parser = argparse.ArgumentParser()
+        parser.add_argument('foo', { nargs: '*', deprecated: true })
+
+        let stderr = captured_stderr(() => parser.parse_args([]))
+        this.assertEqual(0, stderr.split('is deprecated').length - 1)
+
+        stderr = captured_stderr(() => parser.parse_args(['spam']))
+        this.assertRegex(stderr, /warning: argument 'foo' is deprecated/)
+        this.assertEqual(1, stderr.split('is deprecated').length - 1)
+
+        stderr = captured_stderr(() => parser.parse_args(['spam', 'ham']))
+        this.assertRegex(stderr, /warning: argument 'foo' is deprecated/)
+        this.assertEqual(1, stderr.split('is deprecated').length - 1)
+    }
+
+    test_deprecated_subparser () {
+        const parser = argparse.ArgumentParser()
+        const subparsers = parser.add_subparsers()
+        subparsers.add_parser('foo', { aliases: ['baz'], deprecated: true })
+        subparsers.add_parser('bar')
+
+        let stderr = captured_stderr(() => parser.parse_args(['bar']))
+        this.assertEqual(0, stderr.split('is deprecated').length - 1)
+
+        stderr = captured_stderr(() => parser.parse_args(['foo']))
+        this.assertRegex(stderr, /warning: command 'foo' is deprecated/)
+        this.assertEqual(1, stderr.split('is deprecated').length - 1)
+
+        stderr = captured_stderr(() => parser.parse_args(['baz']))
+        this.assertRegex(stderr, /warning: command 'baz' is deprecated/)
+        this.assertEqual(1, stderr.split('is deprecated').length - 1)
+    }
+}).run()
+
 
 // ==================================================================
 // Check semantics regarding the default argument and type conversion
@@ -5286,51 +6778,51 @@ VV VV VV
 
 ;(new class TestTypeFunctionCalledOnDefault extends TestCase {
 
-    test_type_function_call_with_non_string_default() {
-        let spam = int_to_convert => {
+    test_type_function_call_with_non_string_default () {
+        const spam = int_to_convert => {
             this.assertEqual(int_to_convert, 0)
             return 'foo_converted'
         }
 
-        let parser = argparse.ArgumentParser()
+        const parser = argparse.ArgumentParser()
         parser.add_argument('--foo', { type: spam, default: 0 })
-        let args = parser.parse_args([])
+        const args = parser.parse_args([])
         // foo should *not* be converted because its default is not a string.
         this.assertEqual(NS({ foo: 0 }), args)
     }
 
-    test_type_function_call_with_string_default() {
-        let spam = (/*int_to_convert*/) =>
+    test_type_function_call_with_string_default () {
+        const spam = (/* int_to_convert */) =>
             'foo_converted'
 
-        let parser = argparse.ArgumentParser()
+        const parser = argparse.ArgumentParser()
         parser.add_argument('--foo', { type: spam, default: '0' })
-        let args = parser.parse_args([])
+        const args = parser.parse_args([])
         // foo is converted because its default is a string.
         this.assertEqual(NS({ foo: 'foo_converted' }), args)
     }
 
-    test_no_double_type_conversion_of_default() {
-        let extend = str_to_convert =>
+    test_no_double_type_conversion_of_default () {
+        const extend = str_to_convert =>
             str_to_convert + '*'
 
-        let parser = argparse.ArgumentParser()
+        const parser = argparse.ArgumentParser()
         parser.add_argument('--test', { type: extend, default: '*' })
-        let args = parser.parse_args([])
+        const args = parser.parse_args([])
         // The test argument will be two stars, one coming from the default
         // value and one coming from the type conversion being called exactly
         // once.
         this.assertEqual(NS({ test: '**' }), args)
     }
 
-    test_issue_15906() {
+    test_issue_15906 () {
         // Issue #15906: When action='append', type=str, default=[] are
         // providing, the dest value was the string representation "[]" when it
         // should have been an empty list.
-        let parser = argparse.ArgumentParser()
+        const parser = argparse.ArgumentParser()
         parser.add_argument('--test', { dest: 'test', type: 'str',
                             default: [], action: 'append' })
-        let args = parser.parse_args([])
+        const args = parser.parse_args([])
         this.assertEqual(args.test, [])
     }
 }).run()
@@ -5341,46 +6833,182 @@ VV VV VV
 
 ;(new class TestParseKnownArgs extends TestCase {
 
-    /*test_arguments_tuple() {
-        let parser = argparse.ArgumentParser()
-        parser.parse_args([])
-    }*/
-
-    test_arguments_list() {
-        let parser = argparse.ArgumentParser()
+    test_arguments_list () {
+        const parser = argparse.ArgumentParser()
         parser.parse_args([])
     }
 
-    /*test_arguments_tuple_positional() {
-        let parser = argparse.ArgumentParser()
-        parser.add_argument('x')
-        parser.parse_args(['x'])
-    }*/
-
-    test_arguments_list_positional() {
-        let parser = argparse.ArgumentParser()
+    test_arguments_list_positional () {
+        const parser = argparse.ArgumentParser()
         parser.add_argument('x')
         parser.parse_args(['x'])
     }
 
-    test_optionals() {
-        let parser = argparse.ArgumentParser()
+    test_optionals () {
+        const parser = argparse.ArgumentParser()
         parser.add_argument('--foo')
-        let [ args, extras ] = parser.parse_known_args('--foo F --bar --baz'.split(' '))
+        const [args, extras] = parser.parse_known_args('--foo F --bar --baz'.split(' '))
         this.assertEqual(NS({ foo: 'F' }), args)
         this.assertEqual(['--bar', '--baz'], extras)
     }
 
-    test_mixed() {
-        let parser = argparse.ArgumentParser()
+    test_mixed () {
+        const parser = argparse.ArgumentParser()
         parser.add_argument('-v', { nargs: '?', const: 1, type: 'int' })
         parser.add_argument('--spam', { action: 'store_false' })
         parser.add_argument('badger')
 
-        let argv = ["B", "C", "--foo", "-v", "3", "4"]
-        let [ args, extras ] = parser.parse_known_args(argv)
+        const argv = ["B", "C", "--foo", "-v", "3", "4"]
+        const [args, extras] = parser.parse_known_args(argv)
         this.assertEqual(NS({ v: 3, spam: true, badger: "B" }), args)
         this.assertEqual(["C", "--foo", "4"], extras)
+    }
+
+    test_zero_or_more_optional () {
+        const parser = argparse.ArgumentParser()
+        parser.add_argument('x', { nargs: '*', choices: ['x', 'y'] })
+        const args = parser.parse_args([])
+        this.assertEqual(NS({ x: [] }), args)
+    }
+
+}).run()
+
+
+;(new class TestDoubleDash extends TestCase {
+
+    test_single_argument_option () {
+        const parser = argparse.ArgumentParser({ exit_on_error: false })
+        parser.add_argument('-f', '--foo')
+        parser.add_argument('bar', { nargs: '*' })
+
+        let args = parser.parse_args(['--foo=--'])
+        this.assertEqual(NS({ foo: '--', bar: [] }), args)
+        let cm = this.assertRaises(argparse.ArgumentError,
+            () => parser.parse_args(['--foo', '--']))
+        this.assertRegex(cm.exception.message, /argument -f\/--foo: expected one argument/)
+        args = parser.parse_args(['-f--'])
+        this.assertEqual(NS({ foo: '--', bar: [] }), args)
+        cm = this.assertRaises(argparse.ArgumentError,
+            () => parser.parse_args(['-f', '--']))
+        this.assertRegex(cm.exception.message, /argument -f\/--foo: expected one argument/)
+        args = parser.parse_args(['--foo', 'a', '--', 'b', 'c'])
+        this.assertEqual(NS({ foo: 'a', bar: ['b', 'c'] }), args)
+        args = parser.parse_args(['a', 'b', '--foo', 'c'])
+        this.assertEqual(NS({ foo: 'c', bar: ['a', 'b'] }), args)
+        args = parser.parse_args(['a', '--', 'b', '--foo', 'c'])
+        this.assertEqual(NS({ foo: undefined, bar: ['a', 'b', '--foo', 'c'] }), args)
+        args = parser.parse_args(['a', '--', 'b', '--', 'c', '--foo', 'd'])
+        this.assertEqual(NS({ foo: undefined, bar: ['a', 'b', '--', 'c', '--foo', 'd'] }), args)
+
+    }
+
+    test_multiple_argument_option () {
+        const parser = argparse.ArgumentParser({ exit_on_error: false })
+        parser.add_argument('-f', '--foo', { nargs: '*' })
+        parser.add_argument('bar', { nargs: '*' })
+
+        let args = parser.parse_args(['--foo=--'])
+        this.assertEqual(NS({ foo: ['--'], bar: [] }), args)
+        args = parser.parse_args(['--foo', '--'])
+        this.assertEqual(NS({ foo: [], bar: [] }), args)
+        args = parser.parse_args(['-f--'])
+        this.assertEqual(NS({ foo: ['--'], bar: [] }), args)
+        args = parser.parse_args(['-f', '--'])
+        this.assertEqual(NS({ foo: [], bar: [] }), args)
+        args = parser.parse_args(['--foo', 'a', 'b', '--', 'c', 'd'])
+        this.assertEqual(NS({ foo: ['a', 'b'], bar: ['c', 'd'] }), args)
+        args = parser.parse_args(['a', 'b', '--foo', 'c', 'd'])
+        this.assertEqual(NS({ foo: ['c', 'd'], bar: ['a', 'b'] }), args)
+        args = parser.parse_args(['a', '--', 'b', '--foo', 'c', 'd'])
+        this.assertEqual(NS({ foo: undefined, bar: ['a', 'b', '--foo', 'c', 'd'] }), args)
+        let argv
+        ;[args, argv] = parser.parse_known_args(['a', 'b', '--foo', 'c', '--', 'd'])
+        this.assertEqual(NS({ foo: ['c'], bar: ['a', 'b'] }), args)
+        this.assertEqual(['--', 'd'], argv)
+
+    }
+
+    test_multiple_double_dashes () {
+        const parser = argparse.ArgumentParser({ exit_on_error: false })
+        parser.add_argument('foo')
+        parser.add_argument('bar', { nargs: '*' })
+
+        let args = parser.parse_args(['--', 'a', 'b', 'c'])
+        this.assertEqual(NS({ foo: 'a', bar: ['b', 'c'] }), args)
+        args = parser.parse_args(['a', '--', 'b', 'c'])
+        this.assertEqual(NS({ foo: 'a', bar: ['b', 'c'] }), args)
+        args = parser.parse_args(['a', 'b', '--', 'c'])
+        this.assertEqual(NS({ foo: 'a', bar: ['b', 'c'] }), args)
+        args = parser.parse_args(['a', '--', 'b', '--', 'c'])
+        this.assertEqual(NS({ foo: 'a', bar: ['b', '--', 'c'] }), args)
+        args = parser.parse_args(['--', '--', 'a', '--', 'b', 'c'])
+        this.assertEqual(NS({ foo: '--', bar: ['a', '--', 'b', 'c'] }), args)
+
+    }
+
+    test_remainder () {
+        let parser = argparse.ArgumentParser({ exit_on_error: false })
+        parser.add_argument('foo')
+        parser.add_argument('bar', { nargs: '...' })
+
+        let args = parser.parse_args(['--', 'a', 'b', 'c'])
+        this.assertEqual(NS({ foo: 'a', bar: ['b', 'c'] }), args)
+        args = parser.parse_args(['a', '--', 'b', 'c'])
+        this.assertEqual(NS({ foo: 'a', bar: ['b', 'c'] }), args)
+        args = parser.parse_args(['a', 'b', '--', 'c'])
+        this.assertEqual(NS({ foo: 'a', bar: ['b', '--', 'c'] }), args)
+        args = parser.parse_args(['a', '--', 'b', '--', 'c'])
+        this.assertEqual(NS({ foo: 'a', bar: ['b', '--', 'c'] }), args)
+
+        parser = argparse.ArgumentParser({ exit_on_error: false })
+        parser.add_argument('--foo')
+        parser.add_argument('bar', { nargs: '...' })
+        args = parser.parse_args(['--foo', 'a', '--', 'b', '--', 'c'])
+        this.assertEqual(NS({ foo: 'a', bar: ['--', 'b', '--', 'c'] }), args)
+    }
+
+    test_subparser () {
+        const parser = argparse.ArgumentParser({ exit_on_error: false })
+        parser.add_argument('foo')
+        const subparsers = parser.add_subparsers()
+        const parser1 = subparsers.add_parser('run')
+        parser1.add_argument('-f')
+        parser1.add_argument('bar', { nargs: '*' })
+
+        let args = parser.parse_args(['x', 'run', 'a', 'b', '-f', 'c'])
+        this.assertEqual(NS({ foo: 'x', f: 'c', bar: ['a', 'b'] }), args)
+        args = parser.parse_args(['x', 'run', 'a', 'b', '--', '-f', 'c'])
+        this.assertEqual(NS({ foo: 'x', f: undefined, bar: ['a', 'b', '-f', 'c'] }), args)
+        args = parser.parse_args(['x', 'run', 'a', '--', 'b', '-f', 'c'])
+        this.assertEqual(NS({ foo: 'x', f: undefined, bar: ['a', 'b', '-f', 'c'] }), args)
+        args = parser.parse_args(['x', 'run', '--', 'a', 'b', '-f', 'c'])
+        this.assertEqual(NS({ foo: 'x', f: undefined, bar: ['a', 'b', '-f', 'c'] }), args)
+        args = parser.parse_args(['x', '--', 'run', 'a', 'b', '-f', 'c'])
+        this.assertEqual(NS({ foo: 'x', f: 'c', bar: ['a', 'b'] }), args)
+        args = parser.parse_args(['--', 'x', 'run', 'a', 'b', '-f', 'c'])
+        this.assertEqual(NS({ foo: 'x', f: 'c', bar: ['a', 'b'] }), args)
+        args = parser.parse_args(['x', 'run', '--', 'a', '--', 'b'])
+        this.assertEqual(NS({ foo: 'x', f: undefined, bar: ['a', '--', 'b'] }), args)
+        args = parser.parse_args(['x', '--', 'run', '--', 'a', '--', 'b'])
+        this.assertEqual(NS({ foo: 'x', f: undefined, bar: ['a', '--', 'b'] }), args)
+        const cm = this.assertRaises(argparse.ArgumentError,
+            () => parser.parse_args(['--', 'x', '--', 'run', 'a', 'b']))
+        this.assertRegex(cm.exception.message, /invalid choice: '--'/)
+    }
+
+    test_subparser_after_multiple_argument_option () {
+        const parser = argparse.ArgumentParser({ exit_on_error: false })
+        parser.add_argument('--foo', { nargs: '*' })
+        const subparsers = parser.add_subparsers()
+        const parser1 = subparsers.add_parser('run')
+        parser1.add_argument('-f')
+        parser1.add_argument('bar', { nargs: '*' })
+
+        const args = parser.parse_args(['--foo', 'x', 'y', '--', 'run', 'a', 'b', '-f', 'c'])
+        this.assertEqual(NS({ foo: ['x', 'y'], f: 'c', bar: ['a', 'b'] }), args)
+        const cm = this.assertRaises(argparse.ArgumentError,
+            () => parser.parse_args(['--foo', 'x', '--', '--', 'run', 'a', 'b']))
+        this.assertRegex(cm.exception.message, /invalid choice: '--'/)
     }
 }).run()
 
@@ -5389,11 +7017,11 @@ VV VV VV
 // ===========================
 
 ;(new class TestIntermixedArgs extends TestCase {
-    test_basic() {
+    test_basic () {
         // test parsing intermixed optionals and positionals
-        let parser = argparse.ArgumentParser({ prog: 'PROG' })
+        const parser = argparse.ArgumentParser({ prog: 'PROG' })
         parser.add_argument('--foo', { dest: 'foo' })
-        let bar = parser.add_argument('--bar', { dest: 'bar', required: true })
+        const bar = parser.add_argument('--bar', { dest: 'bar', required: true })
         parser.add_argument('cmd')
         parser.add_argument('rest', { nargs: '*', type: 'int' })
         let argv = 'cmd --foo x 1 --bar y 2 3'.split(' ')
@@ -5402,65 +7030,102 @@ VV VV VV
         this.assertEqual(NS({ bar: 'y', cmd: 'cmd', foo: 'x', rest: [1, 2, 3] }), args)
 
         let extras
-        ;[ args, extras ] = parser.parse_known_args(argv)
+        ;[args, extras] = parser.parse_known_args(argv)
         // cannot parse the '1,2,3'
-        this.assertEqual(NS({ bar: 'y', cmd: 'cmd', foo: 'x', rest: [] }), args)
-        this.assertEqual(["1", "2", "3"], extras)
-
-        argv = 'cmd --foo x 1 --error 2 --bar y 3'.split(' ')
-        ;[ args, extras ] = parser.parse_known_intermixed_args(argv)
-        // unknown optionals go into extras
         this.assertEqual(NS({ bar: 'y', cmd: 'cmd', foo: 'x', rest: [1] }), args)
-        this.assertEqual(['--error', '2', '3'], extras)
+        this.assertEqual(["2", "3"], extras)
+
+        ;[args, extras] = parser.parse_known_intermixed_args(argv)
+        this.assertEqual(NS({ bar: 'y', cmd: 'cmd', foo: 'x', rest: [1, 2, 3] }), args)
+        this.assertEqual([], extras)
+
+        // unknown optionals go into extras
+        argv = 'cmd --foo x --error 1 2 --bar y 3'.split(' ')
+        ;[args, extras] = parser.parse_known_intermixed_args(argv)
+        this.assertEqual(NS({ bar: 'y', cmd: 'cmd', foo: 'x', rest: [1, 2, 3] }), args)
+        this.assertEqual(['--error'], extras)
+        argv = 'cmd --foo x 1 --error 2 --bar y 3'.split(' ')
+        ;[args, extras] = parser.parse_known_intermixed_args(argv)
+        this.assertEqual(NS({ bar: 'y', cmd: 'cmd', foo: 'x', rest: [1, 2, 3] }), args)
+        this.assertEqual(['--error'], extras)
+        argv = 'cmd --foo x 1 2 --error --bar y 3'.split(' ')
+        ;[args, extras] = parser.parse_known_intermixed_args(argv)
+        this.assertEqual(NS({ bar: 'y', cmd: 'cmd', foo: 'x', rest: [1, 2, 3] }), args)
+        this.assertEqual(['--error'], extras)
 
         // restores attributes that were temporarily changed
         this.assertIsNone(parser.usage)
         this.assertEqual(bar.required, true)
     }
 
-    test_remainder() {
+    test_remainder () {
         // Intermixed and remainder are incompatible
-        let parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
         parser.add_argument('-z')
         parser.add_argument('x')
         parser.add_argument('y', { nargs: '...' })
-        let argv = 'X A B -z Z'.split(' ')
+        const argv = 'X A B -z Z'.split(' ')
         // intermixed fails with '...' (also 'A...')
         // this.assertRaises(TypeError, parser.parse_intermixed_args, argv)
-        let cm = this.assertRaises(TypeError, () => parser.parse_intermixed_args(argv))
+        const cm = this.assertRaises(TypeError, () => parser.parse_intermixed_args(argv))
         this.assertRegex(String(cm.exception), /\.\.\./)
     }
 
-    test_exclusive() {
-        // mutually exclusive group; intermixed works fine
-        let parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
-        let group = parser.add_mutually_exclusive_group({ required: true })
+    test_required_exclusive () {
+        // required mutually exclusive group; intermixed works fine
+        const parser = argparse.ArgumentParser({ prog: 'PROG', exit_on_error: false })
+        const group = parser.add_mutually_exclusive_group({ required: true })
         group.add_argument('--foo', { action: 'store_true', help: 'FOO' })
         group.add_argument('--spam', { help: 'SPAM' })
         parser.add_argument('badger', { nargs: '*', default: 'X', help: 'BADGER' })
-        let args = parser.parse_intermixed_args('1 --foo 2'.split(' '))
+        let args = parser.parse_intermixed_args('--foo 1 2'.split(' '))
         this.assertEqual(NS({ badger: ['1', '2'], foo: true, spam: undefined }), args)
-        this.assertRaises(ArgumentParserError, () => parser.parse_intermixed_args('1 2'.split(' ')))
+        args = parser.parse_intermixed_args('1 --foo 2'.split(' '))
+        this.assertEqual(NS({ badger: ['1', '2'], foo: true, spam: undefined }), args)
+        const cm = this.assertRaises(argparse.ArgumentError, () =>
+            parser.parse_intermixed_args('1 2'.split(' ')))
+        this.assertRegex(cm.exception.message,
+                         /one of the arguments --foo --spam is required/)
         this.assertEqual(group.required, true)
     }
 
-    test_exclusive_incompatible() {
-        // mutually exclusive group including positional - fail
-        let parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
-        let group = parser.add_mutually_exclusive_group({ required: true })
+    test_required_exclusive_with_positional () {
+        // required mutually exclusive group with positional argument
+        const parser = argparse.ArgumentParser({ prog: 'PROG', exit_on_error: false })
+        const group = parser.add_mutually_exclusive_group({ required: true })
         group.add_argument('--foo', { action: 'store_true', help: 'FOO' })
         group.add_argument('--spam', { help: 'SPAM' })
         group.add_argument('badger', { nargs: '*', default: 'X', help: 'BADGER' })
-        this.assertRaises(TypeError, () => parser.parse_intermixed_args([]))
+        let args = parser.parse_intermixed_args(['--foo'])
+        this.assertEqual(NS({ foo: true, spam: undefined, badger: 'X' }), args)
+        args = parser.parse_intermixed_args(['a', 'b'])
+        this.assertEqual(NS({ foo: false, spam: undefined, badger: ['a', 'b'] }), args)
+        let cm = this.assertRaises(argparse.ArgumentError, () =>
+            parser.parse_intermixed_args([]))
+        this.assertRegex(cm.exception.message,
+                         /one of the arguments --foo --spam badger is required/)
+        cm = this.assertRaises(argparse.ArgumentError, () =>
+            parser.parse_intermixed_args(['--foo', 'a', 'b']))
+        this.assertRegex(cm.exception.message,
+                         /argument badger: not allowed with argument --foo/)
+        cm = this.assertRaises(argparse.ArgumentError, () =>
+            parser.parse_intermixed_args(['a', '--foo', 'b']))
+        this.assertRegex(cm.exception.message,
+                         /argument badger: not allowed with argument --foo/)
         this.assertEqual(group.required, true)
+    }
+
+    test_invalid_args () {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG' })
+        this.assertRaises(ArgumentParserError, () => parser.parse_intermixed_args(['a']))
     }
 }).run()
 
 ;(new class TestIntermixedMessageContentError extends TestCase {
     // case where Intermixed gives different error message
     // error is raised by 1st parsing step
-    test_missing_argument_name_in_message() {
-        let parser = new ErrorRaisingArgumentParser({ prog: 'PROG', usage: '' })
+    test_missing_argument_name_in_message () {
+        const parser = new ErrorRaisingArgumentParser({ prog: 'PROG', usage: '' })
         parser.add_argument('req_pos', { type: 'str' })
         parser.add_argument('-req_opt', { type: 'int', required: true })
 
@@ -5471,7 +7136,7 @@ VV VV VV
 
         cm = this.assertRaises(ArgumentParserError, () => parser.parse_intermixed_args([]))
         msg = String(cm.exception)
-        this.assertNotRegex(msg, /req_pos/)
+        this.assertRegex(msg, /req_pos/)
         this.assertRegex(msg, /req_opt/)
     }
 }).run()
@@ -5484,212 +7149,212 @@ VV VV VV
 
     EXPECTED_MESSAGE = "length of metavar tuple does not match nargs"
 
-    do_test_no_exception({ nargs, metavar }) {
-        let parser = argparse.ArgumentParser()
+    do_test_no_exception ({ nargs, metavar }) {
+        const parser = argparse.ArgumentParser()
         parser.add_argument("--foo", { nargs, metavar })
     }
 
-    do_test_exception({ nargs, metavar }) {
-        let parser = argparse.ArgumentParser()
-        let cm = this.assertRaises(TypeError, () => parser.add_argument("--foo", { nargs, metavar }))
+    do_test_exception ({ nargs, metavar }) {
+        const parser = argparse.ArgumentParser()
+        const cm = this.assertRaises(TypeError, () => parser.add_argument("--foo", { nargs, metavar }))
         this.assertEqual(cm.exception.message, this.EXPECTED_MESSAGE)
     }
 
     // Unit tests for different values of metavar when nargs=None
 
-    test_nargs_None_metavar_string() {
+    test_nargs_None_metavar_string () {
         this.do_test_no_exception({ nargs: undefined, metavar: "1" })
     }
 
-    test_nargs_undefined_metavar_length0() {
+    test_nargs_undefined_metavar_length0 () {
         this.do_test_exception({ nargs: undefined, metavar: [] })
     }
 
-    test_nargs_undefined_metavar_length1() {
+    test_nargs_undefined_metavar_length1 () {
         this.do_test_no_exception({ nargs: undefined, metavar: ["1"] })
     }
 
-    test_nargs_undefined_metavar_length2() {
+    test_nargs_undefined_metavar_length2 () {
         this.do_test_exception({ nargs: undefined, metavar: ["1", "2"] })
     }
 
-    test_nargs_undefined_metavar_length3() {
+    test_nargs_undefined_metavar_length3 () {
         this.do_test_exception({ nargs: undefined, metavar: ["1", "2", "3"] })
     }
 
     // Unit tests for different values of metavar when nargs=?
 
-    test_nargs_optional_metavar_string() {
+    test_nargs_optional_metavar_string () {
         this.do_test_no_exception({ nargs: "?", metavar: "1" })
     }
 
-    test_nargs_optional_metavar_length0() {
+    test_nargs_optional_metavar_length0 () {
         this.do_test_exception({ nargs: "?", metavar: [] })
     }
 
-    test_nargs_optional_metavar_length1() {
+    test_nargs_optional_metavar_length1 () {
         this.do_test_no_exception({ nargs: "?", metavar: ["1"] })
     }
 
-    test_nargs_optional_metavar_length2() {
+    test_nargs_optional_metavar_length2 () {
         this.do_test_exception({ nargs: "?", metavar: ["1", "2"] })
     }
 
-    test_nargs_optional_metavar_length3() {
+    test_nargs_optional_metavar_length3 () {
         this.do_test_exception({ nargs: "?", metavar: ["1", "2", "3"] })
     }
 
     // Unit tests for different values of metavar when nargs=*
 
-    test_nargs_zeroormore_metavar_string() {
+    test_nargs_zeroormore_metavar_string () {
         this.do_test_no_exception({ nargs: "*", metavar: "1" })
     }
 
-    test_nargs_zeroormore_metavar_length0() {
+    test_nargs_zeroormore_metavar_length0 () {
         this.do_test_exception({ nargs: "*", metavar: [] })
     }
 
-    test_nargs_zeroormore_metavar_length1() {
+    test_nargs_zeroormore_metavar_length1 () {
         this.do_test_no_exception({ nargs: "*", metavar: ["1"] })
     }
 
-    test_nargs_zeroormore_metavar_length2() {
+    test_nargs_zeroormore_metavar_length2 () {
         this.do_test_no_exception({ nargs: "*", metavar: ["1", "2"] })
     }
 
-    test_nargs_zeroormore_metavar_length3() {
+    test_nargs_zeroormore_metavar_length3 () {
         this.do_test_exception({ nargs: "*", metavar: ["1", "2", "3"] })
     }
 
     // Unit tests for different values of metavar when nargs=+
 
-    test_nargs_oneormore_metavar_string() {
+    test_nargs_oneormore_metavar_string () {
         this.do_test_no_exception({ nargs: "+", metavar: "1" })
     }
 
-    test_nargs_oneormore_metavar_length0() {
+    test_nargs_oneormore_metavar_length0 () {
         this.do_test_exception({ nargs: "+", metavar: [] })
     }
 
-    test_nargs_oneormore_metavar_length1() {
+    test_nargs_oneormore_metavar_length1 () {
         this.do_test_exception({ nargs: "+", metavar: ["1"] })
     }
 
-    test_nargs_oneormore_metavar_length2() {
+    test_nargs_oneormore_metavar_length2 () {
         this.do_test_no_exception({ nargs: "+", metavar: ["1", "2"] })
     }
 
-    test_nargs_oneormore_metavar_length3() {
+    test_nargs_oneormore_metavar_length3 () {
         this.do_test_exception({ nargs: "+", metavar: ["1", "2", "3"] })
     }
 
     // Unit tests for different values of metavar when nargs=...
 
-    test_nargs_remainder_metavar_string() {
+    test_nargs_remainder_metavar_string () {
         this.do_test_no_exception({ nargs: "...", metavar: "1" })
     }
 
-    test_nargs_remainder_metavar_length0() {
+    test_nargs_remainder_metavar_length0 () {
         this.do_test_no_exception({ nargs: "...", metavar: [] })
     }
 
-    test_nargs_remainder_metavar_length1() {
+    test_nargs_remainder_metavar_length1 () {
         this.do_test_no_exception({ nargs: "...", metavar: ["1"] })
     }
 
-    test_nargs_remainder_metavar_length2() {
+    test_nargs_remainder_metavar_length2 () {
         this.do_test_no_exception({ nargs: "...", metavar: ["1", "2"] })
     }
 
-    test_nargs_remainder_metavar_length3() {
+    test_nargs_remainder_metavar_length3 () {
         this.do_test_no_exception({ nargs: "...", metavar: ["1", "2", "3"] })
     }
 
     // Unit tests for different values of metavar when nargs=A...
 
-    test_nargs_parser_metavar_string() {
+    test_nargs_parser_metavar_string () {
         this.do_test_no_exception({ nargs: "A...", metavar: "1" })
     }
 
-    test_nargs_parser_metavar_length0() {
+    test_nargs_parser_metavar_length0 () {
         this.do_test_exception({ nargs: "A...", metavar: [] })
     }
 
-    test_nargs_parser_metavar_length1() {
+    test_nargs_parser_metavar_length1 () {
         this.do_test_no_exception({ nargs: "A...", metavar: ["1"] })
     }
 
-    test_nargs_parser_metavar_length2() {
+    test_nargs_parser_metavar_length2 () {
         this.do_test_exception({ nargs: "A...", metavar: ["1", "2"] })
     }
 
-    test_nargs_parser_metavar_length3() {
+    test_nargs_parser_metavar_length3 () {
         this.do_test_exception({ nargs: "A...", metavar: ["1", "2", "3"] })
     }
 
     // Unit tests for different values of metavar when nargs=1
 
-    test_nargs_1_metavar_string() {
+    test_nargs_1_metavar_string () {
         this.do_test_no_exception({ nargs: 1, metavar: "1" })
     }
 
-    test_nargs_1_metavar_length0() {
+    test_nargs_1_metavar_length0 () {
         this.do_test_exception({ nargs: 1, metavar: [] })
     }
 
-    test_nargs_1_metavar_length1() {
+    test_nargs_1_metavar_length1 () {
         this.do_test_no_exception({ nargs: 1, metavar: ["1"] })
     }
 
-    test_nargs_1_metavar_length2() {
+    test_nargs_1_metavar_length2 () {
         this.do_test_exception({ nargs: 1, metavar: ["1", "2"] })
     }
 
-    test_nargs_1_metavar_length3() {
+    test_nargs_1_metavar_length3 () {
         this.do_test_exception({ nargs: 1, metavar: ["1", "2", "3"] })
     }
 
     // Unit tests for different values of metavar when nargs=2
 
-    test_nargs_2_metavar_string() {
+    test_nargs_2_metavar_string () {
         this.do_test_no_exception({ nargs: 2, metavar: "1" })
     }
 
-    test_nargs_2_metavar_length0() {
+    test_nargs_2_metavar_length0 () {
         this.do_test_exception({ nargs: 2, metavar: [] })
     }
 
-    test_nargs_2_metavar_length1() {
+    test_nargs_2_metavar_length1 () {
         this.do_test_exception({ nargs: 2, metavar: ["1"] })
     }
 
-    test_nargs_2_metavar_length2() {
+    test_nargs_2_metavar_length2 () {
         this.do_test_no_exception({ nargs: 2, metavar: ["1", "2"] })
     }
 
-    test_nargs_2_metavar_length3() {
+    test_nargs_2_metavar_length3 () {
         this.do_test_exception({ nargs: 2, metavar: ["1", "2", "3"] })
     }
 
     // Unit tests for different values of metavar when nargs=3
 
-    test_nargs_3_metavar_string() {
+    test_nargs_3_metavar_string () {
         this.do_test_no_exception({ nargs: 3, metavar: "1" })
     }
 
-    test_nargs_3_metavar_length0() {
+    test_nargs_3_metavar_length0 () {
         this.do_test_exception({ nargs: 3, metavar: [] })
     }
 
-    test_nargs_3_metavar_length1() {
+    test_nargs_3_metavar_length1 () {
         this.do_test_exception({ nargs: 3, metavar: ["1"] })
     }
 
-    test_nargs_3_metavar_length2() {
+    test_nargs_3_metavar_length2 () {
         this.do_test_exception({ nargs: 3, metavar: ["1", "2"] })
     }
 
-    test_nargs_3_metavar_length3() {
+    test_nargs_3_metavar_length3 () {
         this.do_test_no_exception({ nargs: 3, metavar: ["1", "2", "3"] })
     }
 }).run()
@@ -5702,54 +7367,90 @@ VV VV VV
                               "have nothing to store, actions such as store " +
                               "true or store const may be more appropriate")
 
-    do_test_range_exception({ nargs }) {
-        let parser = argparse.ArgumentParser()
-        let cm = this.assertRaises(TypeError, () => parser.add_argument("--foo", { nargs }))
+    do_test_range_exception ({ nargs }) {
+        const parser = argparse.ArgumentParser()
+        const cm = this.assertRaises(TypeError, () => parser.add_argument("--foo", { nargs }))
         this.assertEqual(cm.exception.message, this.EXPECTED_RANGE_MESSAGE)
     }
 
-    do_test_invalid_exception({ nargs }) {
-        let parser = argparse.ArgumentParser()
-        let cm = this.assertRaises(TypeError, () => parser.add_argument("--foo", { nargs }))
+    do_test_invalid_exception ({ nargs }) {
+        const parser = argparse.ArgumentParser()
+        const cm = this.assertRaises(TypeError, () => parser.add_argument("--foo", { nargs }))
         this.assertEqual(cm.exception.message, this.EXPECTED_INVALID_MESSAGE)
     }
 
     // Unit tests for different values of nargs
 
-    test_nargs_alphabetic() {
+    test_nargs_alphabetic () {
         this.do_test_invalid_exception({ nargs: 'a' })
         this.do_test_invalid_exception({ nargs: "abcd" })
     }
 
-    test_nargs_zero() {
+    test_nargs_zero () {
         this.do_test_range_exception({ nargs: 0 })
     }
 }).run()
 
 // ============================
-// from argparse import * tests
+// CommonJS public exports tests
 // ============================
 
-;(new class TestWrappingMetavar extends TestCase {
+;(new class TestImportStar extends TestCase {
 
-    setUp() {
+    expected_exports = [
+        'Action',
+        'ArgumentDefaultsHelpFormatter',
+        'ArgumentError',
+        'ArgumentParser',
+        'ArgumentTypeError',
+        'BooleanOptionalAction',
+        'FileType',
+        'HelpFormatter',
+        'MetavarTypeHelpFormatter',
+        'Namespace',
+        'ONE_OR_MORE',
+        'OPTIONAL',
+        'PARSER',
+        'REMAINDER',
+        'RawDescriptionHelpFormatter',
+        'RawTextHelpFormatter',
+        'SUPPRESS',
+        'ZERO_OR_MORE',
+    ]
+
+    test () {
+        for (const name of this.expected_exports) {
+            assert(Object.hasOwn(argparse, name))
+        }
+    }
+
+    test_all_exports_everything () {
+        this.assertEqual(this.expected_exports, Object.keys(argparse).sort())
+    }
+}).run()
+
+
+;(new class TestWrappingMetavar extends TestCase {
+    force_not_colorized = new Set(['test_help_with_metavar'])
+
+    setUp () {
         super.setUp()
         this.parser = new ErrorRaisingArgumentParser(
             { prog: 'this_is_spammy_prog_with_a_long_name_sorry_about_the_name' }
         )
         // this metavar was triggering library assertion errors due to usage
         // message formatting incorrectly splitting on the ] chars within
-        let metavar = '<http[s]://example:1234>'
+        const metavar = '<http[s]://example:1234>'
         this.parser.add_argument('--proxy', { metavar })
     }
 
-    test_help_with_metavar() {
-        let help_text = this.parser.format_help()
+    test_help_with_metavar () {
+        const help_text = this.parser.format_help()
         this.assertEqual(help_text, textwrap.dedent(`\
             usage: this_is_spammy_prog_with_a_long_name_sorry_about_the_name
                    [-h] [--proxy <http[s]://example:1234>]
 
-            optional arguments:
+            options:
               -h, --help            show this help message and exit
               --proxy <http[s]://example:1234>
             `))
@@ -5759,19 +7460,504 @@ VV VV VV
 
 ;(new class TestExitOnError extends TestCase {
 
-    setUp() {
-        this.parser = argparse.ArgumentParser({ exit_on_error: false })
+    setUp () {
+        this.parser = argparse.ArgumentParser({
+            exit_on_error: false, fromfile_prefix_chars: '@' })
         this.parser.add_argument('--integers', { metavar: 'N', type: 'int' })
     }
 
-    test_exit_on_error_with_good_args() {
-        let ns = this.parser.parse_args('--integers 4'.split(' '))
+    test_exit_on_error_with_good_args () {
+        const ns = this.parser.parse_args('--integers 4'.split(' '))
         this.assertEqual(ns, argparse.Namespace({ integers: 4 }))
     }
 
-    test_exit_on_error_with_bad_args() {
+    test_exit_on_error_with_bad_args () {
         this.assertRaises(argparse.ArgumentError, () => {
             this.parser.parse_args('--integers a'.split(' '))
         })
+    }
+
+    test_unrecognized_args () {
+        const cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args('--foo bar'.split(' '))
+        })
+        this.assertRegex(cm.exception.message, /unrecognized arguments: --foo bar/)
+    }
+
+    test_unrecognized_intermixed_args () {
+        const cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_intermixed_args('--foo bar'.split(' '))
+        })
+        this.assertRegex(cm.exception.message, /unrecognized arguments: --foo bar/)
+    }
+
+    test_required_args () {
+        this.parser.add_argument('bar')
+        this.parser.add_argument('baz')
+        const cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args([])
+        })
+        this.assertRegex(cm.exception.message,
+                         /the following arguments are required: bar, baz$/)
+    }
+
+    test_required_args_with_metavar () {
+        this.parser.add_argument('bar')
+        this.parser.add_argument('baz', { metavar: 'BaZ' })
+        const cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args([])
+        })
+        this.assertRegex(cm.exception.message,
+                         /the following arguments are required: bar, BaZ$/)
+    }
+
+    test_required_args_n () {
+        this.parser.add_argument('bar')
+        this.parser.add_argument('baz', { nargs: 3 })
+        const cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args([])
+        })
+        this.assertRegex(cm.exception.message,
+                         /the following arguments are required: bar, baz$/)
+    }
+
+    test_required_args_n_with_metavar () {
+        this.parser.add_argument('bar')
+        this.parser.add_argument('baz', { nargs: 3, metavar: ['B', 'A', 'Z'] })
+        const cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args([])
+        })
+        this.assertRegex(cm.exception.message,
+                         /the following arguments are required: bar, B, A, Z$/)
+    }
+
+    test_required_args_optional () {
+        this.parser.add_argument('bar')
+        this.parser.add_argument('baz', { nargs: '?' })
+        const cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args([])
+        })
+        this.assertRegex(cm.exception.message,
+                         /the following arguments are required: bar$/)
+    }
+
+    test_required_args_zero_or_more () {
+        this.parser.add_argument('bar')
+        this.parser.add_argument('baz', { nargs: '*' })
+        const cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args([])
+        })
+        this.assertRegex(cm.exception.message,
+                         /the following arguments are required: bar$/)
+    }
+
+    test_required_args_one_or_more () {
+        this.parser.add_argument('bar')
+        this.parser.add_argument('baz', { nargs: '+' })
+        const cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args([])
+        })
+        this.assertRegex(cm.exception.message,
+                         /the following arguments are required: bar, baz$/)
+    }
+
+    test_required_args_one_or_more_with_metavar () {
+        this.parser.add_argument('bar')
+        this.parser.add_argument('baz', { nargs: '+', metavar: ['BaZ1', 'BaZ2'] })
+        const cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args([])
+        })
+        this.assertRegex(cm.exception.message,
+                         /the following arguments are required: bar, BaZ1\[, BaZ2]$/)
+    }
+
+    test_required_args_remainder () {
+        this.parser.add_argument('bar')
+        this.parser.add_argument('baz', { nargs: '...' })
+        const cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args([])
+        })
+        this.assertRegex(cm.exception.message,
+                         /the following arguments are required: bar$/)
+    }
+
+    test_required_mutually_exclusive_args () {
+        const group = this.parser.add_mutually_exclusive_group({ required: true })
+        group.add_argument('--bar')
+        group.add_argument('--baz')
+        const cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args([])
+        })
+        this.assertRegex(cm.exception.message,
+                         /one of the arguments --bar --baz is required/)
+    }
+
+    test_conflicting_mutually_exclusive_args_optional_with_metavar () {
+        const group = this.parser.add_mutually_exclusive_group()
+        group.add_argument('--bar')
+        group.add_argument('baz', { nargs: '?', metavar: 'BaZ' })
+        let cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args(['--bar', 'a', 'b'])
+        })
+        this.assertRegex(cm.exception.message,
+                         /argument BaZ: not allowed with argument --bar$/)
+        cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args(['a', '--bar', 'b'])
+        })
+        this.assertRegex(cm.exception.message,
+                         /argument --bar: not allowed with argument BaZ$/)
+    }
+
+    test_conflicting_mutually_exclusive_args_zero_or_more_with_metavar1 () {
+        const group = this.parser.add_mutually_exclusive_group()
+        group.add_argument('--bar')
+        group.add_argument('baz', { nargs: '*', metavar: ['BAZ1'] })
+        let cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args(['--bar', 'a', 'b'])
+        })
+        this.assertRegex(cm.exception.message,
+                         /argument BAZ1: not allowed with argument --bar$/)
+        cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args(['a', '--bar', 'b'])
+        })
+        this.assertRegex(cm.exception.message,
+                         /argument --bar: not allowed with argument BAZ1$/)
+    }
+
+    test_conflicting_mutually_exclusive_args_zero_or_more_with_metavar2 () {
+        const group = this.parser.add_mutually_exclusive_group()
+        group.add_argument('--bar')
+        group.add_argument('baz', { nargs: '*', metavar: ['BAZ1', 'BAZ2'] })
+        let cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args(['--bar', 'a', 'b'])
+        })
+        this.assertRegex(cm.exception.message,
+                         /argument BAZ1\[, BAZ2]: not allowed with argument --bar$/)
+        cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args(['a', '--bar', 'b'])
+        })
+        this.assertRegex(cm.exception.message,
+                         /argument --bar: not allowed with argument BAZ1\[, BAZ2]$/)
+    }
+
+    test_ambiguous_option () {
+        this.parser.add_argument('--foobaz')
+        this.parser.add_argument('--fooble', { action: 'store_true' })
+        this.parser.add_argument('--foogle')
+        let cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args(['--foob'])
+        })
+        this.assertRegex(cm.exception.message,
+                         /ambiguous option: --foob could match --foobaz, --fooble/)
+        cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args(['--foob=1'])
+        })
+        this.assertRegex(cm.exception.message,
+                         /ambiguous option: --foob=1 could match --foobaz, --fooble$/)
+        cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args(['--foob', '1', '--foogle', '2'])
+        })
+        this.assertRegex(cm.exception.message,
+                         /ambiguous option: --foob could match --foobaz, --fooble$/)
+        cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args(['--foob=1', '--foogle', '2'])
+        })
+        this.assertRegex(cm.exception.message,
+                         /ambiguous option: --foob=1 could match --foobaz, --fooble$/)
+    }
+
+    test_os_error () {
+        this.parser.add_argument('file')
+        const cm = this.assertRaises(argparse.ArgumentError, () => {
+            this.parser.parse_args(['@no-such-file'])
+        })
+        this.assertRegex(cm.exception.message,
+                         /no such file or directory.*no-such-file/i)
+    }
+}).run()
+
+
+// =========================
+// Default program name tests
+// =========================
+
+;(new class TestProgName extends TempDirMixin(TestCase) {
+
+    source = `\
+        const argparse = require(${JSON.stringify(require.resolve('../'))})
+        argparse.ArgumentParser().parse_args()
+    `
+
+    check_usage (expected, ...args) {
+        const result = child_process.spawnSync(process.execPath,
+                                                [...args, '-h'],
+                                                { encoding: 'utf8' })
+        this.assertEqual(0, result.status)
+        this.assertEqual('', result.stderr)
+        this.assertEqual(`usage: ${expected} [-h]`,
+                         result.stdout.split(/\r?\n/, 1)[0])
+    }
+
+    test_script () {
+        const script_name = path.join(this.temp_dir, 'example.js')
+        fs.writeFileSync(script_name, this.source)
+        this.check_usage(path.basename(script_name), script_name)
+    }
+
+    test_package () {
+        const package_name = path.join(this.temp_dir, 'package_entry')
+        fs.mkdirSync(package_name)
+        fs.writeFileSync(path.join(package_name, 'index.js'), this.source)
+        fs.writeFileSync(path.join(package_name, 'package.json'),
+                         JSON.stringify({ main: 'index.js' }))
+        this.check_usage(path.basename(package_name), package_name)
+    }
+}).run()
+
+
+// ===========
+// Color tests
+// ===========
+
+;(new class TestColorized extends TestCase {
+    setUp () {
+        super.setUp()
+        this.can_colorize = _colorize.can_colorize
+        _colorize.can_colorize = () => true
+        this.theme = _colorize.get_theme({ force_color: true }).argparse
+    }
+
+    tearDown () {
+        _colorize.can_colorize = this.can_colorize
+    }
+
+    test_argparse_color () {
+        const parser = argparse.ArgumentParser({
+            color: true,
+            description: 'Colorful help',
+            formatter_class: argparse.ArgumentDefaultsHelpFormatter,
+            prefix_chars: '-+',
+            prog: 'PROG'
+        })
+        const group = parser.add_mutually_exclusive_group()
+        group.add_argument('-v', '--verbose', { action: 'store_true', help: 'more spam' })
+        group.add_argument('-q', '--quiet', { action: 'store_true', help: 'less spam' })
+        parser.add_argument('x', { type: 'int', help: 'the base' })
+        parser.add_argument('y', { type: 'int', help: 'the exponent', deprecated: true })
+        parser.add_argument('this_indeed_is_a_very_long_action_name', {
+            type: 'int',
+            help: 'the exponent'
+        })
+        parser.add_argument('-o', '--optional1', { action: 'store_true', deprecated: true })
+        parser.add_argument('--optional2', { help: 'pick one' })
+        parser.add_argument('--optional3', { choices: ['X', 'Y', 'Z'] })
+        parser.add_argument('--optional4', { choices: ['X', 'Y', 'Z'], help: 'pick one' })
+        parser.add_argument('--optional5', { choices: ['X', 'Y', 'Z'], help: 'pick one' })
+        parser.add_argument('--optional6', { choices: ['X', 'Y', 'Z'], help: 'pick one' })
+        parser.add_argument('-p', '--optional7', {
+            choices: ['Aaaaa', 'Bbbbb', 'Ccccc', 'Ddddd'],
+            help: 'pick one'
+        })
+        parser.add_argument('+f')
+        parser.add_argument('++bar')
+        parser.add_argument('-+baz')
+        parser.add_argument('-c', '--count')
+
+        const subparsers = parser.add_subparsers({
+            title: 'subcommands',
+            description: 'valid subcommands',
+            help: 'additional help'
+        })
+        subparsers.add_parser('sub1', { deprecated: true, help: 'sub1 help' })
+        const sub2 = subparsers.add_parser('sub2', { deprecated: true, help: 'sub2 help' })
+        sub2.add_argument('--baz', { choices: ['X', 'Y', 'Z'], help: 'baz help' })
+
+        const {
+            prog,
+            heading,
+            summary_long_option: long,
+            summary_short_option: short,
+            summary_label: label,
+            summary_action: pos,
+            long_option: long_b,
+            short_option: short_b,
+            label: label_b,
+            action: pos_b,
+            reset
+        } = this.theme
+
+        this.assertEqual(textwrap.dedent(`\
+            ${heading}usage: ${reset}${prog}PROG${reset} [${short}-h${reset}] [${short}-v${reset} | ${short}-q${reset}] [${short}-o${reset}] [${long}--optional2 ${label}OPTIONAL2${reset}] [${long}--optional3 ${label}{X,Y,Z}${reset}]
+                        [${long}--optional4 ${label}{X,Y,Z}${reset}] [${long}--optional5 ${label}{X,Y,Z}${reset}] [${long}--optional6 ${label}{X,Y,Z}${reset}]
+                        [${short}-p ${label}{Aaaaa,Bbbbb,Ccccc,Ddddd}${reset}] [${short}+f ${label}F${reset}] [${long}++bar ${label}BAR${reset}] [${long}-+baz ${label}BAZ${reset}]
+                        [${short}-c ${label}COUNT${reset}]
+                        ${pos}x${reset} ${pos}y${reset} ${pos}this_indeed_is_a_very_long_action_name${reset} ${pos}{sub1,sub2} ...${reset}
+
+            Colorful help
+
+            ${heading}positional arguments:${reset}
+              ${pos_b}x${reset}                     the base
+              ${pos_b}y${reset}                     the exponent
+              ${pos_b}this_indeed_is_a_very_long_action_name${reset}
+                                    the exponent
+
+            ${heading}options:${reset}
+              ${short_b}-h${reset}, ${long_b}--help${reset}            show this help message and exit
+              ${short_b}-v${reset}, ${long_b}--verbose${reset}         more spam (default: false)
+              ${short_b}-q${reset}, ${long_b}--quiet${reset}           less spam (default: false)
+              ${short_b}-o${reset}, ${long_b}--optional1${reset}
+              ${long_b}--optional2${reset} ${label_b}OPTIONAL2${reset}
+                                    pick one (default: undefined)
+              ${long_b}--optional3${reset} ${label_b}{X,Y,Z}${reset}
+              ${long_b}--optional4${reset} ${label_b}{X,Y,Z}${reset}   pick one (default: undefined)
+              ${long_b}--optional5${reset} ${label_b}{X,Y,Z}${reset}   pick one (default: undefined)
+              ${long_b}--optional6${reset} ${label_b}{X,Y,Z}${reset}   pick one (default: undefined)
+              ${short_b}-p${reset}, ${long_b}--optional7${reset} ${label_b}{Aaaaa,Bbbbb,Ccccc,Ddddd}${reset}
+                                    pick one (default: undefined)
+              ${short_b}+f${reset} ${label_b}F${reset}
+              ${long_b}++bar${reset} ${label_b}BAR${reset}
+              ${long_b}-+baz${reset} ${label_b}BAZ${reset}
+              ${short_b}-c${reset}, ${long_b}--count${reset} ${label_b}COUNT${reset}
+
+            ${heading}subcommands:${reset}
+              valid subcommands
+
+              ${pos_b}{sub1,sub2}${reset}           additional help
+                ${pos_b}sub1${reset}                sub1 help
+                ${pos_b}sub2${reset}                sub2 help
+        `), parser.format_help())
+    }
+
+    test_argparse_color_mutually_exclusive_group_usage () {
+        const parser = argparse.ArgumentParser({ color: true, prog: 'PROG' })
+        const group = parser.add_mutually_exclusive_group()
+        group.add_argument('--foo', { action: 'store_true', help: 'FOO' })
+        group.add_argument('--spam', { help: 'SPAM' })
+        group.add_argument('badger', { nargs: '*', help: 'BADGER' })
+
+        const {
+            prog,
+            heading,
+            summary_long_option: long,
+            summary_short_option: short,
+            summary_label: label,
+            summary_action: pos,
+            reset
+        } = this.theme
+
+        this.assertEqual(
+            `${heading}usage: ${reset}${prog}PROG${reset} [${short}-h${reset}] ` +
+            `[${long}--foo${reset} | ${long}--spam ${label}SPAM${reset} | ` +
+            `${pos}badger ...${reset}]\n`,
+            parser.format_usage()
+        )
+    }
+
+    test_argparse_color_custom_usage () {
+        const parser = argparse.ArgumentParser({
+            add_help: false,
+            color: true,
+            description: 'Test prog and usage colors',
+            prog: 'PROG',
+            usage: '[prefix] %(prog)s [suffix]'
+        })
+        const { heading, prog, prog_extra: usage, reset } = this.theme
+
+        this.assertEqual(textwrap.dedent(`\
+            ${heading}usage: ${reset}${usage}[prefix] ${prog}PROG${reset}${usage} [suffix]${reset}
+
+            Test prog and usage colors
+        `), parser.format_help())
+    }
+
+    test_custom_formatter_function () {
+        function custom_formatter (options) {
+            return argparse.RawTextHelpFormatter({ ...options, indent_increment: 5 })
+        }
+
+        const parser = argparse.ArgumentParser({
+            prog: 'PROG',
+            prefix_chars: '-+',
+            formatter_class: custom_formatter,
+            color: true
+        })
+        parser.add_argument('+f', '++foo', { help: 'foo help' })
+        parser.add_argument('spam', { help: 'spam help' })
+
+        const {
+            prog,
+            heading,
+            summary_short_option: short,
+            summary_label: label,
+            summary_action: pos,
+            long_option: long_b,
+            short_option: short_b,
+            label: label_b,
+            action: pos_b,
+            reset
+        } = this.theme
+
+        this.assertEqual(textwrap.dedent(`\
+            ${heading}usage: ${reset}${prog}PROG${reset} [${short}-h${reset}] [${short}+f ${label}FOO${reset}] ${pos}spam${reset}
+
+            ${heading}positional arguments:${reset}
+                 ${pos_b}spam${reset}           spam help
+
+            ${heading}options:${reset}
+                 ${short_b}-h${reset}, ${long_b}--help${reset}     show this help message and exit
+                 ${short_b}+f${reset}, ${long_b}++foo${reset} ${label_b}FOO${reset}  foo help
+        `), parser.format_help())
+    }
+
+    test_custom_formatter_class () {
+        class CustomFormatter extends argparse.RawTextHelpFormatter {
+            constructor (options) {
+                super({ ...options, indent_increment: 5 })
+            }
+        }
+
+        const parser = argparse.ArgumentParser({
+            prog: 'PROG',
+            prefix_chars: '-+',
+            formatter_class: CustomFormatter,
+            color: true
+        })
+        parser.add_argument('+f', '++foo', { help: 'foo help' })
+        parser.add_argument('spam', { help: 'spam help' })
+
+        const {
+            prog,
+            heading,
+            summary_short_option: short,
+            summary_label: label,
+            summary_action: pos,
+            long_option: long_b,
+            short_option: short_b,
+            label: label_b,
+            action: pos_b,
+            reset
+        } = this.theme
+
+        this.assertEqual(textwrap.dedent(`\
+            ${heading}usage: ${reset}${prog}PROG${reset} [${short}-h${reset}] [${short}+f ${label}FOO${reset}] ${pos}spam${reset}
+
+            ${heading}positional arguments:${reset}
+                 ${pos_b}spam${reset}           spam help
+
+            ${heading}options:${reset}
+                 ${short_b}-h${reset}, ${long_b}--help${reset}     show this help message and exit
+                 ${short_b}+f${reset}, ${long_b}++foo${reset} ${label_b}FOO${reset}  foo help
+        `), parser.format_help())
+    }
+
+    test_subparser_prog_is_stored_without_color () {
+        const parser = argparse.ArgumentParser({ prog: 'complex', color: true })
+        const sub = parser.add_subparsers({ dest: 'command' })
+        const demo_parser = sub.add_parser('demo')
+
+        assert(!demo_parser.prog.includes('\x1b['))
+
+        demo_parser.color = false
+        assert(!demo_parser.format_help().includes('\x1b['))
     }
 }).run()
